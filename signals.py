@@ -320,9 +320,8 @@ def calc_position_size(총자산, atr, market):
                    업비트 BTC는 ATR이 USD 대비 약 1300배 크므로 수량이 자동으로 작아짐
       KR / US    → 주식 (정수 단위, 최소 1주)
     """
-    if atr is None or (isinstance(atr, float) and (np.isnan(atr) or atr == 0)):
-        return 0
-
+if atr is None or atr == 0 or (isinstance(atr, float) and np.isnan(atr)):
+    return 0             # ← NaN도 방어
     # 리스크 금액 = 총자산의 1%
     리스크_금액 = 총자산 * 0.01
 
