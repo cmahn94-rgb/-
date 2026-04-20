@@ -6,9 +6,9 @@ on:
     # 00:00 UTC = 09:00 KST
     # 06:20 UTC = 15:20 KST
     # 14:30 UTC = 23:30 KST
-    - cron: '0 0 * * *'
-    - cron: '20 6 * * *'
-    - cron: '30 14 * * *'
+    - cron: '05 0 * * *'
+    - cron: '50 6 * * *'
+    - cron: '35 14 * * *'
   workflow_dispatch:
 
 jobs:
