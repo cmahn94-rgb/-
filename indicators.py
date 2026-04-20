@@ -122,4 +122,8 @@ def calc_atr(df, period=20):
 
     # ATR = True Range의 20일 평균
     atr_변동폭 = true_range.rolling(period).mean().iloc[-1]
+    # ✅ NaN 방어: 데이터 부족 시 None 반환
+    if pd.isna(atr_변동폭):
+        return None
+    
     return atr_변동폭
