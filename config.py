@@ -25,7 +25,7 @@ def create_default_files():
     # .env 파일: 텔레그램 봇 토큰과 채팅 ID를 저장하는 '비밀 파일'
     # 이 파일은 절대 GitHub 등에 올리면 안 된다 → .gitignore에 등록
     # GitHub Actions에서는 Secrets를 사용하므로, 환경 변수가 없을 때만 생성한다.
-   if not os.path.exists(".env"):
+    if not os.path.exists(".env"):
         # 로컬 실행 환경인지 확인 (환경 변수에 토큰이 없거나 기본값인 경우)
         if not os.getenv("TELEGRAM_TOKEN") or "여기에" in os.getenv("TELEGRAM_TOKEN", ""):
             with open(".env", "w", encoding="utf-8") as f:
