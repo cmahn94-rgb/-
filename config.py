@@ -19,16 +19,22 @@ def create_default_files():
     """
     프로그램 실행에 필요한 설정 파일들을 자동으로 만들어준다.
     파일이 이미 있으면 덮어쓰지 않는다 (사용자 설정 보호).
+    GitHub Actions 환경(Secrets)과 로컬 환경을 모두 지원한다.
     """
 
     # .env 파일: 텔레그램 봇 토큰과 채팅 ID를 저장하는 '비밀 파일'
     # 이 파일은 절대 GitHub 등에 올리면 안 된다 → .gitignore에 등록
-    if not os.path.exists(".env"):
-        with open(".env", "w", encoding="utf-8") as f:
-            f.write("TELEGRAM_TOKEN=여기에_텔레그램_봇_토큰_입력\n")
-            f.write("TELEGRAM_CHAT_ID=여기에_채팅_ID_입력\n")
-        print("✅ .env 파일 생성 완료 — 텔레그램 토큰과 채팅 ID를 입력하세요.")
-
+    # GitHub Actions에서는 Secrets를 사용하므로, 환경 변수가 없을 때만 생성한다.
+   if not os.path.exists(".env"):
+        # 로컬 실행 환경인지 확인 (환경 변수에 토큰이 없거나 기본값인 경우)
+        if not os.getenv("TELEGRAM_TOKEN") or "여기에" in os.getenv("TELEGRAM_TOKEN", ""):
+            with open(".env", "w", encoding="utf-8") as f:
+                f.write("TELEGRAM_TOKEN=여기에_텔레그램_봇_토큰_입력\n")
+                f.write("TELEGRAM_CHAT_ID=여기에_채팅_ID_입력\n")
+            print("✅ .env 파일 생성 완료 — 텔레그램 토큰과 채팅 ID를 입력하세요.")
+        else:
+            print("ℹ️ GitHub Actions 환경: Secrets로 등록된 환경 변수를 사용합니다.")
+          
     # settings.txt: RSI 기준값, 목표 수익률, 손절 기준 등 전략 파라미터
     # 이 파일만 수정하면 전략 전체가 바뀐다 (코드 수정 불필요)
     if not os.path.exists("settings.txt"):
