@@ -321,7 +321,7 @@ def calc_position_size(총자산, atr, market):
       KR / US    → 주식 (정수 단위, 최소 1주)
     """
 if atr is None or atr == 0 or (isinstance(atr, float) and np.isnan(atr)):
-    return 0             # ← NaN도 방어
+        return 0             # ← NaN도 방어
     # 리스크 금액 = 총자산의 1%
     리스크_금액 = 총자산 * 0.01
 
