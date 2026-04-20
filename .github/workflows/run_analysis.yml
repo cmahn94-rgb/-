@@ -2,33 +2,36 @@ name: Quant Strategy Daily Run
 
 on:
   schedule:
-    # UTC 기준 (한국 시간 -9시간)
-    # 00:00 UTC = 09:00 KST (장 시작 분석)
-    # 06:20 UTC = 15:20 KST (장 마감 분석)
+    # UTC 기준
+    # 00:00 UTC = 09:00 KST
+    # 06:20 UTC = 15:20 KST
+    # 14:30 UTC = 23:30 KST
     - cron: '0 0 * * *'
     - cron: '20 6 * * *'
-  workflow_dispatch: # 버튼을 눌러 수동으로도 실행 가능하게 함
+    - cron: '30 14 * * *'
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v5
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+          cache: 'pip'
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    - name: Run analysis
-      env:
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      run: python main.py
+      - name: Run analysis
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
