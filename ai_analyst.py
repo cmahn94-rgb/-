@@ -31,6 +31,8 @@ _MODEL          = "gemini-2.5-flash"
 
 # AI 코멘트 기능(키가 없으면 AI만 생략하고 정상 진행)
 
+_TRANSLATION_CACHE: dict[str, str] = {}
+
 
 def _call_gemini(system_prompt: str, user_content: str, max_output_tokens: int = 300) -> str:
     """
@@ -145,3 +147,30 @@ def get_ai_signal_reason(ticker: str, name: str, 지표: dict) -> str:
     )
 
     return _call_gemini(system, user_msg, max_output_tokens=80)
+
+
+def translate_to_korean_one_line(text: str) -> str:
+    """
+    영어(또는 비한국어) 문장을 한국어 한 줄로 짧게 번역한다.
+    - API 키가 없으면 빈 문자열 반환(=번역 생략)
+    """
+    if not text or not isinstance(text, str):
+        return ""
+
+    key = text.strip()
+    if not key:
+        return ""
+    if key in _TRANSLATION_CACHE:
+        return _TRANSLATION_CACHE[key]
+
+    system = (
+        "당신은 금융 뉴스 번역가입니다. "
+        "입력 문장을 한국어로 자연스럽게 번역하되, 1줄(짧게)로 요약 번역합니다. "
+        "불필요한 수식어는 줄이고 핵심만 남깁니다. "
+        "이모지는 사용하지 않습니다."
+    )
+    user_msg = f"영문 뉴스 요약:\n{text}\n\n한국어 한 줄 번역:"
+    result = _call_gemini(system, user_msg, max_output_tokens=120)
+    # 빈 문자열도 캐시해서 같은 입력에 대해 재시도 호출이 폭주하지 않게 한다.
+    _TRANSLATION_CACHE[key] = result
+    return result

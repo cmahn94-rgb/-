@@ -17,7 +17,7 @@ from signals       import get_market_regime, calc_signals, run_backtest, calc_po
 from data_loader   import get_price_data, get_news_summary, clear_cache, bulk_download
 from portfolio     import check_portfolio_alerts
 from telegram_bot  import send_telegram
-from ai_analyst    import get_ai_market_commentary, get_ai_signal_reason
+from ai_analyst    import get_ai_market_commentary, get_ai_signal_reason, translate_to_korean_one_line
 
 MAX_WORKERS = 20
 
@@ -113,7 +113,6 @@ def analyze_one(종목, settings):
 def build_report_sections(종목목록, settings, 크립토_하락_레짐):
     매수신호_섹션 = ""
     크립토_섹션   = ""
-    뉴스_섹션     = ""
     신호_종목_요약 = []   # AI 코멘트용
 
     결과_맵 = {}
@@ -137,6 +136,12 @@ def build_report_sections(종목목록, settings, 크립토_하락_레짐):
                 결과_맵[ticker] = None
 
     def 조건표시(v): return "✅" if v else "❌"
+    def 영어같음(s: str) -> bool:
+        if not s:
+            return False
+        # 아주 단순 휴리스틱: ASCII 알파벳 비중이 높으면 영어로 간주
+        letters = sum(1 for c in s if ("a" <= c.lower() <= "z"))
+        return letters >= max(10, int(len(s) * 0.35))
 
     for 종목 in 종목목록:
         ticker = 종목["ticker"]
@@ -200,6 +205,21 @@ def build_report_sections(종목목록, settings, 크립토_하락_레짐):
             신호_블록 += f"  • 🤖 {ai_이유}\n"
         신호_블록 += bt_문구
 
+        # ── 뉴스: 매수 신호 바로 아래에 붙이기 ──
+        if 뉴스_목록:
+            신호_블록 += f"  • 📰 뉴스 (변동 {변동률:+.1f}%):\n"
+            for item in 뉴스_목록:
+                text = item.get("text") if isinstance(item, dict) else str(item)
+                sentiment = item.get("sentiment") if isinstance(item, dict) else "중립"
+
+                # 영어 뉴스면(추정) Gemini로 한 줄 번역(키 없으면 번역 생략)
+                if 영어같음(text):
+                    ko = translate_to_korean_one_line(text)
+                    if ko:
+                        text = ko.strip()
+
+                신호_블록 += f"    - [{sentiment}] {text}\n"
+
         if market in ("CRYPTO", "CRYPTO_KRW"):
             if 크립토_하락_레짐:
                 신호_블록 += "  ⚠️ *BTC 하락 레짐 감지*: 소액·분할 매수만 고려하세요.\n"
@@ -207,14 +227,7 @@ def build_report_sections(종목목록, settings, 크립토_하락_레짐):
         else:
             매수신호_섹션 += 신호_블록 + "─────────────────────────\n"
 
-        if 뉴스_목록:
-            뉴스_섹션 += f"📰 *{name} 뉴스* (변동 {변동률:+.1f}%)\n"
-            for item in 뉴스_목록:
-                text = item.get("text") if isinstance(item, dict) else str(item)
-                sentiment = item.get("sentiment") if isinstance(item, dict) else "중립"
-                뉴스_섹션 += f"  • [{sentiment}] {text}\n"
-
-    return 매수신호_섹션, 크립토_섹션, 뉴스_섹션, 신호_종목_요약
+    return 매수신호_섹션, 크립토_섹션, "", 신호_종목_요약
 
 
 def run_analysis(include_crypto=True):
