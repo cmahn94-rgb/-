@@ -1,8 +1,0 @@
-RSI_BUY=50              # RSI가 이 값 미만이면 과매도(저평가) 신호
-RSI_SELL=80             # RSI가 이 값 초과면 과매수(고평가) 신호
-TARGET_PROFIT=25        # 목표 수익률 (%)
-STOP_LOSS=-7            # 손절 기준 (%)
-MA_WINDOW=20            # 이동평균선 기간 (일)
-COMMISSION=0.001        # 수수료 0.1%
-SLIPPAGE=0.0005         # 슬리피지 0.05%
-BUY_SCORE_THRESHOLD=3   # 매수 신호 최소 점수 (6점 만점, 3점 이상이면 알림)
