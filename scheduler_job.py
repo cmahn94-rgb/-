@@ -17,7 +17,11 @@ from signals       import get_market_regime, calc_signals, run_backtest, calc_po
 from data_loader   import get_price_data, get_news_summary, clear_cache, bulk_download
 from portfolio     import check_portfolio_alerts
 from telegram_bot  import send_telegram
-from ai_analyst    import get_ai_market_commentary, get_ai_signal_reason, translate_to_korean_one_line
+from ai_analyst    import (
+    get_ai_market_commentary,
+    get_ai_signal_reasons_batch,
+    translate_to_korean_one_line_batch,
+)
 
 MAX_WORKERS = 20
 
@@ -143,6 +147,26 @@ def build_report_sections(종목목록, settings, 크립토_하락_레짐):
         letters = sum(1 for c in s if ("a" <= c.lower() <= "z"))
         return letters >= max(10, int(len(s) * 0.35))
 
+    # ── 배치 AI: 종목별 신호 이유를 한 번에 생성 ──
+    reason_inputs = []
+    for 종목 in 종목목록:
+        ticker = 종목["ticker"]
+        d = 결과_맵.get(ticker)
+        if d is None or not d["결과"]["매수신호"]:
+            continue
+        r = d["결과"]
+        reason_inputs.append({
+            "ticker": ticker,
+            "name": d["name"],
+            "rsi": float(r.get("rsi", 0.0)),
+            "score": int(r.get("점수", 0)),
+            "ma": bool(r.get("조건2_ma")),
+            "macd": bool(r.get("조건5_macd")),
+            "vol": bool(r.get("조건3_거래량")),
+            "breakout": bool(r.get("조건6_변동성돌파")),
+        })
+    ai_reason_map = get_ai_signal_reasons_batch(reason_inputs)
+
     for 종목 in 종목목록:
         ticker = 종목["ticker"]
         d = 결과_맵.get(ticker)
@@ -174,15 +198,8 @@ def build_report_sections(종목목록, settings, 크립토_하락_레짐):
             "rsi":    결과["rsi"],
         })
 
-        # AI 종목별 신호 이유 한 줄
-        ai_이유 = get_ai_signal_reason(ticker, name, {
-            "rsi":          결과["rsi"],
-            "점수":          점수,
-            "ma_정배열":     결과["조건2_ma"],
-            "macd_전환":     결과["조건5_macd"],
-            "거래량_증가":   결과["조건3_거래량"],
-            "변동성돌파":    결과["조건6_변동성돌파"],
-        })
+        # AI 종목별 신호 이유 한 줄(배치 결과 사용)
+        ai_이유 = ai_reason_map.get(ticker, "")
 
         수량_표시  = f"{추천_수량:.6f}" if market in ("CRYPTO", "CRYPTO_KRW") else f"{추천_수량}주"
         atr_표시   = f"{통화_기호}{atr:,.0f}"
@@ -208,16 +225,26 @@ def build_report_sections(종목목록, settings, 크립토_하락_레짐):
         # ── 뉴스: 매수 신호 바로 아래에 붙이기 ──
         if 뉴스_목록:
             신호_블록 += f"  • 📰 뉴스 (변동 {변동률:+.1f}%):\n"
+            texts = []
+            sentiments = []
+            is_english_flags = []
             for item in 뉴스_목록:
                 text = item.get("text") if isinstance(item, dict) else str(item)
                 sentiment = item.get("sentiment") if isinstance(item, dict) else "중립"
+                texts.append(text)
+                sentiments.append(sentiment)
+                is_english_flags.append(영어같음(text))
 
-                # 영어 뉴스면(추정) Gemini로 한 줄 번역(키 없으면 번역 생략)
-                if 영어같음(text):
-                    ko = translate_to_korean_one_line(text)
+            # 영어 뉴스만 모아서 "배치 번역" (호출 1회)
+            english_texts = [t for t, f in zip(texts, is_english_flags) if f]
+            translated = translate_to_korean_one_line_batch(english_texts) if english_texts else []
+            it = iter(translated)
+
+            for text, sentiment, is_en in zip(texts, sentiments, is_english_flags):
+                if is_en:
+                    ko = next(it, "")
                     if ko:
                         text = ko.strip()
-
                 신호_블록 += f"    - [{sentiment}] {text}\n"
 
         if market in ("CRYPTO", "CRYPTO_KRW"):
