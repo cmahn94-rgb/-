@@ -347,7 +347,12 @@ def calc_signals(ticker, name, market, settings):
 
         임계값  = int(settings.get("BUY_SCORE_THRESHOLD", 3))
         매수신호 = 총_점수 >= 임계값
-        강력매수 = 총_점수 >= 5
+        # 강력매수 판단 기준 (개선)
+        # ① 기본 지표만으로 5점 이상 → 명확히 강력
+        # ② 총점 4점 이상 + 보너스 조건 1개 이상 → 강력으로 인정
+        #    (BUY_SCORE_THRESHOLD=4로 올린 환경에서도 강력매수 표시 가능)
+        보너스_있음 = bool(보너스1_다이버전스 or 보너스2_복합강세 or 보너스3_신고가)
+        강력매수 = (기본_점수 >= 5) or (총_점수 >= 4 and 보너스_있음)
 
         atr_변동폭 = calc_atr(df)
 
