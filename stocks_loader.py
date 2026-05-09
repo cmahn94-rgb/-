@@ -50,10 +50,11 @@ def load_portfolio():
     with open("portfolio.txt", "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
+            # 빈 줄이나 주석(#으로 시작)은 건너뜀
             if not line or line.startswith("#"):
                 continue
             parts = line.split(",")
-            if len(parts) == 4:
+            if len(parts) == 4:  # 티커,수량,평단가,통화 — 4개 항목이어야 유효
                 try:
                     포트폴리오.append({
                         "ticker":    parts[0].strip(),
