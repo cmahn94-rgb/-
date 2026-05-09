@@ -48,8 +48,8 @@ BATCH_SIZE = 10
 # MAX_RETRIES = 3 → 최대 3번 재시도 (총 4번 시도)
 # BASE_DELAY  = 1 → 첫 대기 시간 1초, 이후 2배씩 증가 (1→2→4초)
 # ─────────────────────────────────────────
-MAX_RETRIES = 3
-BASE_DELAY  = 1   # 초 단위
+MAX_RETRIES = 4
+BASE_DELAY  = 2   # 초 단위 (1→2로 강화: 2→4→8→16초 대기)
 
 # 번역 결과 캐시: 같은 문장은 API 재호출 없이 재사용
 _TRANSLATION_CACHE: dict[str, str] = {}

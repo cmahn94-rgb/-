@@ -312,9 +312,13 @@ def _get_news_alphavantage(ticker: str) -> list[dict]:
     """
     api_key = os.getenv("ALPHAVANTAGE_API_KEY", "")
     if not api_key:
-        return []  # API 키 없으면 건너뜀
+        # run_analysis.yml env 섹션에 ALPHAVANTAGE_API_KEY가 없거나
+        # GitHub Secrets에 등록되지 않은 경우
+        # → 뉴스 소스 2번(Alpha Vantage)을 건너뛰고 yfinance로 폴백
+        return []
 
-    # 한국 주식(.KS, .KQ)은 지원 안 함
+    # 한국 주식(.KS, .KQ)은 Alpha Vantage 티커 지원 안 함
+    # → get_news() 함수에서 yfinance로 폴백됨
     if ticker.endswith((".KS", ".KQ")):
         return []
 
@@ -549,8 +553,12 @@ def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
         raw_items.extend(gemini_news)
 
     # ── 소스 2: Alpha Vantage (감성 점수 포함) ──────────────
-    if len(raw_items) < 3:  # Gemini로 충분하면 API 호출 절약
+    # 미국 주식·크립토만 지원 (한국 주식은 yfinance 폴백)
+    # ALPHAVANTAGE_API_KEY가 run_analysis.yml env에 있어야 동작
+    if len(raw_items) < 3:
         av_news = _get_news_alphavantage(ticker)
+        if av_news:
+            print(f"  📰 Alpha Vantage 뉴스: {ticker} {len(av_news)}개")
         raw_items.extend(av_news)
 
     # ── 소스 3: yfinance (폴백) ─────────────────────────────
