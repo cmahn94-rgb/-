@@ -263,6 +263,16 @@ def build_report_sections(종목목록, settings, 크립토_하락_레짐):
         """조건 달성 여부(bool)를 ✅/❌ 이모지로 변환한다. 리포트 가독성용."""
         return "✅" if v else "❌"
 
+    # ── 매도 신호 종목은 매수 목록에서 제외 ───────────────────
+    # 같은 종목이 매수·매도 신호에 동시 등장하면 혼란을 유발한다.
+    # (예: AMD가 '사세요'와 '파세요'를 동시에 알림)
+    # 매도 신호가 발생한 종목은 매수 목록에서 자동 제거한다.
+    매도_티커_셋 = {
+        ticker for ticker, d in 매도_결과_맵.items() if d is not None
+    }
+    if 매도_티커_셋:
+        print(f"  ⛔ 매수·매도 동시 신호 종목 제거: {매도_티커_셋}")
+
     # ── 우선순위 점수 계산 → 정렬 ────────────────────────────
     # 매수 신호 종목을 종합점수(0~100) 기준으로 정렬해서
     # 알림 상단에 가장 유망한 종목이 오도록 한다.
@@ -271,6 +281,9 @@ def build_report_sections(종목목록, settings, 크립토_하락_레짐):
         ticker = 종목["ticker"]
         d = 결과_맵.get(ticker)
         if d is None or not d["결과"]["매수신호"]:
+            continue
+        # 매도 신호가 있는 종목은 매수 목록에서 제외
+        if ticker in 매도_티커_셋:
             continue
         우선순위점수, 우선순위세부 = calc_priority_score(
             d["결과"],

@@ -18,7 +18,7 @@ ai_analyst.py — Gemini API 기반 AI 시장 해석 모듈
      - 모두 실패 시 빈 문자열 반환 (리포트 전송에는 영향 없음)
      - 503(서버 과부하), 429(요청 초과) 오류에 특히 효과적
 
-  ② 배치 요청 수 제한 (BATCH_SIZE = 10)
+  ② 배치 요청 수 제한 (BATCH_SIZE = 5   # 10→5 변경: 429 오류 방지 (신호 10개 초과 시 반복 실패 해결))
      - AI 신호 이유, 번역 등 배치 호출을 10개씩 끊어서 처리
      - 한 번에 100개 요청이 쏟아지던 것을 10개 × N회로 분산
      - 이렇게 하면 429(Too Many Requests) 오류가 크게 줄어든다
@@ -291,9 +291,9 @@ def translate_to_korean_one_line_batch(texts: list[str]) -> list[str]:
             _TRANSLATION_CACHE[t] = ko_text
             all_translated[batch_start + j] = ko_text
 
-        # 배치 사이 0.5초 대기 → 연속 호출로 인한 429 방지
+        # 배치 사이 1.5초 대기 → 429 반복 실패 방지 (0.5→1.5초로 강화)
         if batch_start + BATCH_SIZE < len(to_translate):
-            time.sleep(0.5)
+            time.sleep(1.5)
 
     # 원래 인덱스 위치에 결과 채우기
     for t, orig_idx in zip(to_translate, index_map):
@@ -348,9 +348,9 @@ def get_ai_signal_reasons_batch(items: list[dict]) -> dict[str, str]:
             if isinstance(k, str) and isinstance(v, str) and k.strip():
                 result_map[k.strip()] = v.strip()
 
-        # 배치 사이 0.5초 대기 → 연속 호출로 인한 429 방지
+        # 배치 사이 1.5초 대기 → 429 반복 실패 방지 (0.5→1.5초로 강화)
         if batch_start + BATCH_SIZE < len(items):
-            time.sleep(0.5)
+            time.sleep(1.5)
 
     return result_map
 
