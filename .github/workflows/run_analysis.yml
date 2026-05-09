@@ -2,24 +2,41 @@ name: Quant Strategy Daily Run
 
 on:
   schedule:
-    # UTC 기준 (GitHub Actions는 UTC 사용)
-    # 실제 실행은 서버 부하에 따라 수 분 지연될 수 있음
-    # → timeout-minutes + concurrency로 중복 실행 및 무한 대기 방지
+    # ─────────────────────────────────────────────────────────────
+    # [중요] GitHub Actions cron은 UTC 기준으로 동작한다.
+    # KST = UTC + 9 이므로, 원하는 KST 시각에서 9를 빼면 UTC 시각이 된다.
     #
-    # 00:05 UTC = 09:05 KST  (한국 장 시작 직후)
-    # 06:50 UTC = 15:50 KST  (한국 장 마감 직후)
-    # 14:35 UTC = 23:35 KST  (미국 장 중반)
-    - cron: '05 0 * * *'
-    - cron: '50 6 * * *'
-    - cron: '35 14 * * *'
+    # [알림이 제시간에 안 오는 이유 5가지]
+    # 1) GitHub Actions 서버 부하로 인해 최대 15~20분 지연 가능 (공식 허용)
+    #    → 해결: 원하는 시각보다 5~10분 일찍 예약
+    # 2) 동시에 2개 이상 실행이 겹쳐서 queue 대기 발생
+    #    → 해결: concurrency + cancel-in-progress: true
+    # 3) 이전 실행이 끝나지 않아 다음 실행이 막힘
+    #    → 해결: timeout-minutes 설정으로 강제 종료
+    # 4) Python 스크립트 자체가 에러로 일찍 종료됨
+    #    → 해결: 아래 "실패 알림" step에서 텔레그램으로 바로 알림 수신
+    # 5) GitHub Actions 자체 서비스 장애 (월 1~2회)
+    #    → 해결: workflow_dispatch로 수동 즉시 실행 가능
+    #
+    # 현재 예약 시각 (원하는 KST 시각보다 5분 일찍 설정):
+    # ─────────────────────────────────────────────────────────────
+    # 09:00 KST (한국 장 시작) 원하면 → 08:55 KST = 23:55 UTC (전날)
+    - cron: '55 23 * * 0-4'   # 일~목 23:55 UTC = 월~금 08:55 KST
+
+    # 15:30 KST (한국 장 마감) 원하면 → 15:25 KST = 06:25 UTC
+    - cron: '25 6 * * 1-5'    # 월~금 06:25 UTC = 월~금 15:25 KST
+
+    # 23:30 KST (미국 장 중반) 원하면 → 23:25 KST = 14:25 UTC
+    - cron: '25 14 * * 1-5'   # 월~금 14:25 UTC = 월~금 23:25 KST
+
+  # 수동 실행: GitHub 웹사이트 Actions 탭 → "Run workflow" 버튼으로 즉시 실행 가능
   workflow_dispatch:
 
-# ─────────────────────────────────────────────────────
-# [시간 밀림 해결책]
-# concurrency: 같은 그룹의 실행이 동시에 2개 이상 겹치면
-#              이전 실행을 취소하고 최신 실행만 남긴다.
-# cancel-in-progress: true → 밀려서 쌓인 실행을 모두 취소
-# ─────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# [동시 실행 방지]
+# 같은 그룹의 실행이 2개 이상 겹치면, 이전 것을 취소하고 새 것만 유지.
+# cancel-in-progress: true → 밀려서 쌓인 실행 모두 취소
+# ─────────────────────────────────────────────────────────────────
 concurrency:
   group: quant-daily-run
   cancel-in-progress: true
@@ -28,10 +45,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
-    # [시간 밀림 해결책]
-    # timeout-minutes: 작업이 이 시간(분)을 초과하면 강제 종료.
-    # 평소 실행 시간(~3분)의 3배로 설정 → 무한 대기 방지
-    timeout-minutes: 15
+    # 평균 실행 시간(~3분)의 5배 = 15분으로 설정.
+    # 이 시간을 초과하면 GitHub Actions가 강제 종료.
+    # → 이전 실행이 무한 대기하면서 다음 실행을 막는 현상 방지
+    timeout-minutes: 20
 
     steps:
       - name: Checkout code
@@ -40,7 +57,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'   # 3.10 → 3.11 업그레이드 (성능 향상)
           cache: 'pip'
 
       - name: Install dependencies
@@ -55,9 +72,37 @@ jobs:
           GEMINI_API_KEY:    ${{ secrets.GEMINI_API_KEY }}
         run: python main.py
 
-      # 실행 완료 시각을 로그에 기록 (실제 실행 시각 추적용)
+      # ── 실행 시각 로그 ──────────────────────────────────────────
+      # 텔레그램 알림이 안 왔을 때,
+      # GitHub Actions → 해당 실행 → "Log execution time" step에서
+      # 실제로 몇 시에 실행됐는지 확인할 수 있다.
       - name: Log execution time (KST)
         if: always()
         run: |
+          echo "============================================"
           echo "UTC:  $(date -u '+%Y-%m-%d %H:%M:%S')"
           echo "KST:  $(TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M:%S')"
+          echo "종료 상태: ${{ job.status }}"
+          echo "============================================"
+
+      # ── 실패 시 텔레그램 오류 알림 ──────────────────────────────
+      # Python 스크립트가 실패하거나, 패키지 설치가 안 되는 등
+      # 어떤 이유로든 위 step이 하나라도 실패하면 이 step이 실행된다.
+      #
+      # [중학생 설명]
+      # 알림이 안 왔을 때 GitHub를 열어볼 필요 없이,
+      # 실패하면 텔레그램으로 "에러가 났어요!"를 바로 보내준다.
+      - name: Notify failure via Telegram
+        if: failure()
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          KST=$(TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M:%S')
+          MESSAGE="❌ 퀀트 시스템 실행 실패%0A%0A시각: ${KST} KST%0A%0A원인 확인 방법:%0A1) GitHub Actions 탭 클릭%0A2) 실패한 step(빨간 X) 클릭%0A3) 로그에서 오류 메시지 확인"
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MESSAGE}")
+          echo "텔레그램 오류 알림 전송 결과: HTTP ${HTTP_STATUS}"
+          true
