@@ -110,10 +110,16 @@ def analyze_one(종목, settings):
         if wf is not None:
             신뢰도_아이콘 = {"높음":"🟢", "보통":"🟡", "낮음":"🔴"}.get(wf["신뢰도"], "⚪")
             과적합_표시  = " ⚠️과적합주의" if wf["과적합_경고"] else ""
+            # 검증 구간 거래 수 부족 시 Sharpe가 None일 수 있음
+            검증_결과 = wf.get("검증")
+            if 검증_결과 is None:
+                sharpe_표시 = "거래부족"
+            else:
+                sharpe_표시 = f"{검증_결과['sharpe']:.2f}"
             bt_문구 += (
                 f"  • 🔬 Walk-forward 검증(뒤 4개월): "
                 f"{신뢰도_아이콘} 신뢰도 {wf['신뢰도']}{과적합_표시} "
-                f"| 검증Sharpe: {wf['검증']['sharpe']:.2f}\n"
+                f"| 검증Sharpe: {sharpe_표시}\n"
             )
 
     # 최근 5일 데이터로 전일 대비 변동률과 뉴스 가져오기
@@ -283,13 +289,24 @@ def build_report_sections(종목목록, settings, 크립토_하락_레짐):
         d = 결과_맵.get(ticker)
         if d is None or not d["결과"]["매수신호"]:
             continue
-        # 매도 신호가 있는 종목은 매수 목록에서 제외
+        # 강력매도 종목 매수 제외
         if ticker in 매도_티커_셋:
+            continue
+        # 갭업 +5% 이상 종목은 매수 제외
+        # 이미 고점에 올라탄 진입이라 리스크 대비 기대수익이 낮음
+        갭 = d.get("갭_비율", 0.0)
+        if 갭 >= 5.0:
+            print(f"  ⛔ 갭업 {갭:.1f}% 초과 매수 제외: {ticker}")
             continue
         우선순위점수, 우선순위세부 = calc_priority_score(
             d["결과"],
             d.get("bt_결과")
         )
+        # 갭업 2~5% 구간은 우선순위 점수 패널티 적용
+        if 갭 >= 2.0:
+            갭_패널티 = round((갭 - 2.0) * 3, 1)  # 2%→0점, 5%→9점 패널티
+            우선순위점수 = max(0, 우선순위점수 - 갭_패널티)
+        # 갭다운 2% 이상도 분할매수 전략이므로 패널티 없음 (경고만)
         신호_종목_순서.append((ticker, 우선순위점수, 우선순위세부))
 
     # 종합점수 높은 순으로 정렬

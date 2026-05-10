@@ -291,9 +291,9 @@ def translate_to_korean_one_line_batch(texts: list[str]) -> list[str]:
             _TRANSLATION_CACHE[t] = ko_text
             all_translated[batch_start + j] = ko_text
 
-        # 배치 사이 1.5초 대기 → 429 반복 실패 방지 (0.5→1.5초로 강화)
+        # 배치 사이 3초 대기 → Gemini 무료 분당 15회 한도 대응
         if batch_start + BATCH_SIZE < len(to_translate):
-            time.sleep(1.5)
+            time.sleep(3.0)
 
     # 원래 인덱스 위치에 결과 채우기
     for t, orig_idx in zip(to_translate, index_map):
@@ -348,9 +348,9 @@ def get_ai_signal_reasons_batch(items: list[dict]) -> dict[str, str]:
             if isinstance(k, str) and isinstance(v, str) and k.strip():
                 result_map[k.strip()] = v.strip()
 
-        # 배치 사이 1.5초 대기 → 429 반복 실패 방지 (0.5→1.5초로 강화)
+        # 배치 사이 3초 대기 → Gemini 무료 분당 15회 한도 대응
         if batch_start + BATCH_SIZE < len(items):
-            time.sleep(1.5)
+            time.sleep(3.0)
 
     return result_map
 

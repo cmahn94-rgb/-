@@ -330,11 +330,12 @@ def _get_news_alphavantage(ticker: str) -> list[dict]:
     try:
         url = "https://www.alphavantage.co/query"
         params = {
-            "function": "NEWS_SENTIMENT",
-            "tickers":  av_ticker,
-            "apikey":   api_key,
-            "limit":    5,
-            "sort":     "RELEVANCE",  # 관련도 높은 순 (LATEST보다 더 정확)
+            "function":                "NEWS_SENTIMENT",
+            "tickers":                av_ticker,
+            "apikey":                 api_key,
+            "limit":                  10,   # 5→10: 필터링 후 충분한 여유분 확보
+            "sort":                   "RELEVANCE",
+            "relevance_score_threshold": "0.3",  # 관련도 0.3 미만 기사 제거
         }
         resp = requests.get(url, params=params, timeout=12)
         if resp.status_code != 200:
@@ -354,8 +355,16 @@ def _get_news_alphavantage(ticker: str) -> list[dict]:
 
             # Alpha Vantage 감성 점수: 0~1 (0.5 기준, 높을수록 긍정)
             # ticker_sentiment 배열에서 이 종목의 점수만 추출
-            av_sentiment_label = "중립"
+            # 해당 ticker의 sentiment가 없는 기사는 무관 기사일 가능성 높음 → 제외
             ticker_sentiments = item.get("ticker_sentiment", [])
+            ticker_mentioned = any(
+                ts.get("ticker", "").upper() == av_ticker.upper()
+                for ts in ticker_sentiments
+            )
+            if not ticker_mentioned:
+                continue  # 이 종목이 언급 안 된 기사는 건너뜀
+
+            av_sentiment_label = "중립"
             for ts in ticker_sentiments:
                 if ts.get("ticker", "").upper() == av_ticker.upper():
                     score = float(ts.get("ticker_sentiment_score", 0.5))
@@ -374,7 +383,7 @@ def _get_news_alphavantage(ticker: str) -> list[dict]:
                 "sentiment": av_sentiment_label,
                 "source":    "alphavantage",
             })
-        return result
+        return result[:5]  # 최대 5개만 반환
 
     except Exception as e:
         print(f"⚠️ Alpha Vantage 뉴스 오류 ({ticker}): {e}")
