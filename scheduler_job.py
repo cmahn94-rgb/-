@@ -114,6 +114,9 @@ def analyze_one(종목, settings):
             검증_결과 = wf.get("검증")
             if 검증_결과 is None:
                 sharpe_표시 = "거래부족"
+            elif 검증_결과.get("거래횟수", 0) < 4:
+                # 거래 횟수 부족 → Sharpe 신뢰 불가
+                sharpe_표시 = f"거래부족({검증_결과['거래횟수']}회)"
             else:
                 sharpe_표시 = f"{검증_결과['sharpe']:.2f}"
             bt_문구 += (
@@ -212,7 +215,7 @@ def calc_priority_score(결과: dict, bt: dict | None) -> tuple[float, dict]:
     return 종합, 세부
 
 
-def build_report_sections(종목목록, settings, 크립토_하락_레짐):
+def build_report_sections(종목목록, settings, 크립토_하락_레짐, 포트폴리오=None):
     """
     모든 종목을 병렬 분석하고, 매수/매도/크립토 섹션을 각각 만든다.
 
@@ -355,7 +358,13 @@ def build_report_sections(종목목록, settings, 크립토_하락_레짐):
             "breakout":   bool(r.get("조건6_변동성돌파")),
             "divergence": bool(r.get("보너스_다이버전스")),
         })
-    ai_reason_map = get_ai_signal_reasons_batch(reason_inputs)
+    # 신호 종목이 많을 때만 AI 이유 배치 호출 (429 방지)
+    # 3개 이하면 텍스트 분량이 적어 굳이 AI 코멘트 불필요
+    if len(reason_inputs) > 3:
+        import time as _time; _time.sleep(3)  # 이전 API 호출 후 쿨다운
+        ai_reason_map = get_ai_signal_reasons_batch(reason_inputs)
+    else:
+        ai_reason_map = get_ai_signal_reasons_batch(reason_inputs)
 
     # ── 매수 신호 섹션 조립 (우선순위 정렬 순서로) ──────────
     표시된_주식_수 = 0
@@ -518,11 +527,18 @@ def build_report_sections(종목목록, settings, 크립토_하락_레짐):
         else:
             매수신호_섹션 += 신호_블록 + "─────────────────────────\n"
 
-    # ── 매도 신호 섹션 조립 ─────────────────────────────────────
+    # ── 매도 신호 섹션 조립 (보유 종목에만 표시) ─────────────────
+    # portfolio.txt에 등록된 종목에서만 매도 신호를 표시한다.
+    # 보유하지 않는 종목의 매도 신호는 의미 없는 알림이므로 제거.
+    보유_티커_셋 = {p["ticker"] for p in 포트폴리오} if 포트폴리오 else set()
+
     for 종목 in 종목목록:
         ticker = 종목["ticker"]
         d = 매도_결과_맵.get(ticker)
         if d is None:
+            continue
+        # 포트폴리오에 없는 종목은 매도 신호 생략
+        if 보유_티커_셋 and ticker not in 보유_티커_셋:
             continue
 
         market    = d["market"]
@@ -675,10 +691,11 @@ def run_analysis(include_crypto=True):
 
     # ── 섹션 생성 ────────────────────────────────────────────
     매수신호_섹션, 크립토_섹션, 매도신호_섹션, 신호_종목_요약 = build_report_sections(
-        종목목록, settings, 크립토_하락_레짐
+        종목목록, settings, 크립토_하락_레짐, 포트폴리오
     )
 
-    # AI 시장 코멘트 (신호 종목이 있거나 하락장일 때)
+    # AI 시장 코멘트 — 신호이유 배치 후 5초 대기 (429 방지)
+    import time as _time; _time.sleep(5)
     ai_코멘트 = get_ai_market_commentary(
         하락_레짐, 크립토_하락_레짐, 경고_목록, 신호_종목_요약
     )
