@@ -345,7 +345,11 @@ def calc_signals(ticker, name, market, settings):
         보너스_점수 = sum([보너스1_다이버전스, 보너스2_복합강세, 보너스3_신고가])
         총_점수    = 기본_점수 + 보너스_점수 - 주간봉_패널티
 
-        임계값  = int(settings.get("BUY_SCORE_THRESHOLD", 3))
+        임계값_기본 = int(settings.get("BUY_SCORE_THRESHOLD", 3))
+        # RSI 조건(c1)이 ❌이면 임계값을 1점 더 높게 요구
+        # → RSI 과열(70+) 구간에서 52주신고가+거래량+변동성돌파만으로
+        #   매수 신호가 뜨는 문제 방지 (실제론 고점 진입 위험)
+        임계값 = 임계값_기본 + (0 if 조건1_rsi else 1)
         매수신호 = 총_점수 >= 임계값
         # 강력매수 판단 기준
         # ① 기본 지표만으로 5점 이상 → 명확히 강력

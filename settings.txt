@@ -11,3 +11,4 @@ MAX_SIGNAL_DISPLAY=10    # 텔레그램 알림에 상세 표시할 최대 매수
 TRAILING_STOP=8         # 트레일링 스탑: 고점 대비 이 % 하락 시 청산 [신규, Van Tharp 기준]
 TARGET_1=12             # 분할 매도 1차 목표 수익률 (%) [신규]
 TARGET_2=25             # 분할 매도 2차 목표 수익률 (%) [신규]
+MIN_SHARPE=0.5          # 백테스트 Sharpe 최솟값 — 미달 시 매수신호 차단
