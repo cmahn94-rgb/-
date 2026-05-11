@@ -142,6 +142,118 @@ def _call_gemini(system_prompt: str, user_content: str, max_output_tokens: int =
 # AI 시장 코멘트 생성
 # ─────────────────────────────────────────
 
+
+# ─────────────────────────────────────────
+# 시장 주요 뉴스 브리핑 (알림 최상단 표시)
+# ─────────────────────────────────────────
+
+def get_market_news_briefing(market_time: str = "KST") -> str:
+    """
+    현재 시장 상황과 주요 이슈 3가지를 Gemini Google Search로 실시간 검색해서
+    텔레그램 알림 최상단에 표시할 브리핑을 생성한다.
+
+    [중학생 설명]
+    토스 주식 앱처럼 "지금 가장 중요한 시장 뉴스 3개"를 요약해서 보여준다.
+    각 이슈는 아래 형식으로 표시된다:
+      ① 이슈 제목 [호재/악재/중립]
+         → 관련 종목: 삼성전자(+3.2%), SK하이닉스(+5.1%)
+         → 한 줄 요약
+
+    Gemini Google Search Grounding으로 실시간 검색하므로
+    API 키만 있으면 별도 뉴스 구독 없이 최신 정보를 가져온다.
+
+    반환값: 브리핑 문자열 (실패 시 빈 문자열)
+    """
+    import datetime
+    api_key = __import__("os").getenv("GEMINI_API_KEY", "")
+    if not api_key:
+        return ""
+
+    # 현재 시각 기준 시장 구분
+    from zoneinfo import ZoneInfo
+    now_h = datetime.datetime.now(ZoneInfo("Asia/Seoul")).hour  # KST 기준
+    if 9 <= now_h < 16:
+        시장_컨텍스트 = "한국 주식시장(KOSPI/KOSDAQ) 장중"
+    elif now_h >= 22 or now_h < 6:
+        시장_컨텍스트 = "미국 주식시장(나스닥/S&P500) 장중 및 한국 시간 심야"
+    else:
+        시장_컨텍스트 = "글로벌 주식시장 장외"
+
+    query = (
+        f"지금 {시장_컨텍스트} 기준으로 오늘 주식시장에서 "
+        f"가장 중요한 이슈 3가지를 알려줘. "
+        f"각 이슈마다: "
+        f"1) 이슈 제목(10자 이내) "
+        f"2) 호재/악재/중립 판단 "
+        f"3) 관련 종목과 등락률 "
+        f"4) 한 줄 요약(30자 이내) "
+        f"를 포함해서 아래 JSON 형식으로만 답해줘. "
+        f"다른 설명 없이 JSON만 출력해. "
+        f'[{{"title":"이슈제목","sentiment":"호재","stocks":"삼성전자+3%,SK하이닉스+5%","summary":"한줄요약"}},'
+        f'{{"title":"...","sentiment":"...","stocks":"...","summary":"..."}},'
+        f'{{"title":"...","sentiment":"...","stocks":"...","summary":"..."}}]'
+    )
+
+    try:
+        import requests, json
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-2.5-flash:generateContent"
+        )
+        headers = {
+            "x-goog-api-key": api_key,
+            "content-type":   "application/json",
+        }
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": query}]}],
+            "tools":    [{"google_search": {}}],   # 실시간 검색
+            "generationConfig": {"maxOutputTokens": 600},
+        }
+
+        resp = requests.post(url, headers=headers, json=payload, timeout=20)
+        if resp.status_code != 200:
+            return ""
+
+        data       = resp.json()
+        candidates = data.get("candidates", [])
+        if not candidates:
+            return ""
+        parts = candidates[0].get("content", {}).get("parts", [])
+        raw   = " ".join(p.get("text", "") for p in parts if p.get("text")).strip()
+
+        # JSON 파싱
+        raw_clean = raw.replace("```json", "").replace("```", "").strip()
+        start = raw_clean.find("[")
+        end   = raw_clean.rfind("]")
+        if start == -1 or end == -1:
+            return ""
+        items = json.loads(raw_clean[start:end + 1])
+        if not isinstance(items, list):
+            return ""
+
+        # 브리핑 텍스트 조립
+        감성_아이콘 = {"호재": "🟢", "악재": "🔴", "중립": "⚪"}
+        lines = ["📰 *시장 주요 이슈*"]
+        for i, item in enumerate(items[:3], 1):
+            title     = item.get("title",     "")[:15]
+            sentiment = item.get("sentiment", "중립")
+            stocks    = item.get("stocks",    "")[:30]
+            summary   = item.get("summary",   "")[:40]
+            아이콘    = 감성_아이콘.get(sentiment, "⚪")
+            lines.append(
+                f"  {i}. {아이콘} *{title}* [{sentiment}]"
+            )
+            if stocks:
+                lines.append(f"     관련: {stocks}")
+            if summary:
+                lines.append(f"     {summary}")
+
+        return "\n".join(lines) + "\n"
+
+    except Exception as e:
+        print(f"⚠️ 시장 브리핑 생성 오류: {e}")
+        return ""
+
 def get_ai_market_commentary(
     하락_레짐: bool,
     크립토_하락_레짐: bool,

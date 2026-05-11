@@ -1,4 +1,4 @@
-RSI_BUY=40              # RSI가 이 값 미만이면 과매도(저평가) 신호 [최적화: 50→40, Wilder 원저 기준]
+RSI_BUY=50              # RSI가 이 값 미만이면 과매도(저평가) 신호 (40은 급등장에서 신호 0개 → 50 복원)
 RSI_SELL=75             # RSI가 이 값 초과면 과매수(고평가) 신호 [최적화: 80→75, Connors RSI 기준]
 TARGET_PROFIT=25        # 목표 수익률 (%)
 STOP_LOSS=-5            # 손절 기준 (%) [최적화: -7→-5, Van Tharp ATR×2 기준]
@@ -11,4 +11,4 @@ MAX_SIGNAL_DISPLAY=10    # 텔레그램 알림에 상세 표시할 최대 매수
 TRAILING_STOP=8         # 트레일링 스탑: 고점 대비 이 % 하락 시 청산 [신규, Van Tharp 기준]
 TARGET_1=12             # 분할 매도 1차 목표 수익률 (%) [신규]
 TARGET_2=25             # 분할 매도 2차 목표 수익률 (%) [신규]
-MIN_SHARPE=0.5          # 백테스트 Sharpe 최솟값 — 미달 시 매수신호 차단
+MIN_SHARPE=0.3          # 백테스트 Sharpe 최솟값 (0.5는 급등장에서 거의 불가 → 0.3으로 완화)
