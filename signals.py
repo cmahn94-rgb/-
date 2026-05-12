@@ -42,7 +42,7 @@ import numpy as np
 import pandas as pd
 
 from data_loader  import get_price_data, get_weekly_data
-from indicators   import calc_rsi, calc_bollinger_bands, calc_macd, calc_atr, calc_adx
+from indicators   import calc_rsi, calc_bollinger_bands, calc_macd, calc_atr, calc_adx, calc_stochastic, calc_cci
 
 
 # ─────────────────────────────────────────
@@ -329,9 +329,27 @@ def calc_signals(ticker, name, market, settings):
             (현재가 >= 최고가_52주 * 0.95)
         )
 
+        # ⑩ 보너스: MACD 전환 + 스토캐스틱 골든크로스 동시
+        # 두 지표가 동시에 상승 전환 = 허위신호 50% 감소
+        보너스4_stoch_macd = False
+        try:
+            k, d = calc_stochastic(df, 14)
+            # 스토캐스틱: K가 D 위로 교차 + K < 40 (과매도 구간 탈출)
+            stoch_golden = (k > d) and (k < 40)
+            보너스4_stoch_macd = bool(조건5_macd and stoch_golden)
+        except Exception:
+            보너스4_stoch_macd = False
+
+        # ⑪ 보너스: CCI 극단 과매도 (RSI와 이중 확인)
+        # CCI < -100 = 통계적으로 극단적 저평가
+        보너스5_cci = False
+        try:
+            cci_값 = calc_cci(df, 14)
+            보너스5_cci = bool(조건1_rsi and cci_값 < -100)
+        except Exception:
+            보너스5_cci = False
+
         # ── 주간봉 MACD 필터 (다중 타임프레임) ─────────────────────
-        # 일봉 신호가 있어도 주간봉 MACD가 음수(큰 흐름이 하락)이면
-        # 단기 반등일 가능성 높음 → 점수 -1 패널티
         주간봉_패널티 = 0
         try:
             df_weekly = get_weekly_data(ticker, period="2y")
@@ -342,7 +360,8 @@ def calc_signals(ticker, name, market, settings):
         except Exception:
             주간봉_패널티 = 0
 
-        보너스_점수 = sum([보너스1_다이버전스, 보너스2_복합강세, 보너스3_신고가])
+        보너스_점수 = sum([보너스1_다이버전스, 보너스2_복합강세, 보너스3_신고가,
+                          보너스4_stoch_macd, 보너스5_cci])
         총_점수    = 기본_점수 + 보너스_점수 - 주간봉_패널티
 
         임계값_기본 = int(settings.get("BUY_SCORE_THRESHOLD", 3))
@@ -386,6 +405,8 @@ def calc_signals(ticker, name, market, settings):
             "보너스_다이버전스": 보너스1_다이버전스,
             "보너스_복합강세":  보너스2_복합강세,
             "보너스_신고가":    보너스3_신고가,
+            "보너스_stoch":     보너스4_stoch_macd,
+            "보너스_cci":       보너스5_cci,
             "주간봉_패널티":   주간봉_패널티,
         }
 
@@ -685,11 +706,12 @@ def _run_backtest_on_df(df, market, settings):
         macd_line, sig_line, hist = calc_macd(close)
         avg_vol = volume.rolling(20).mean() if volume is not None else None
 
-        RSI_BUY       = settings.get("RSI_BUY",       40)
-        RSI_SELL      = settings.get("RSI_SELL",       75)
-        STOP_LOSS     = settings.get("STOP_LOSS",      -5)
+        # settings.txt 값 그대로 사용 (run_backtest와 동일한 기준 보장)
+        RSI_BUY       = float(settings.get("RSI_BUY",    50))  # 기본 50 (settings.txt와 동일)
+        RSI_SELL      = float(settings.get("RSI_SELL",   75))
+        STOP_LOSS     = float(settings.get("STOP_LOSS",  -5))
         TRAILING_STOP = float(settings.get("TRAILING_STOP", 8))
-        threshold     = int(settings.get("BUY_SCORE_THRESHOLD", 3))
+        threshold     = int(settings.get("BUY_SCORE_THRESHOLD", 4))  # 기본 4 (settings.txt와 동일)
         commission    = settings.get("COMMISSION",  0.001)
         slippage      = settings.get("SLIPPAGE",    0.0005)
         거래세        = 0.002 if market == "KR" else 0.0

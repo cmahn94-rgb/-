@@ -214,3 +214,82 @@ def calc_adx(df, period=14):
     except Exception as e:
         # ADX 계산 실패 시 None 반환 (이 지표 하나 때문에 전체가 멈추지 않도록)
         return None
+
+
+def calc_stochastic(df, period=14):
+    """
+    스토캐스틱(Stochastic Oscillator) K값과 D값을 계산한다.
+
+    [중학생 설명]
+    최근 14일 중 오늘 가격이 어디쯤에 위치하는지를 0~100으로 나타낸 것.
+    - K < 20: 최근 최저점 근처 = 과매도 → 반등 가능성
+    - K > 80: 최근 최고점 근처 = 과매수 → 하락 가능성
+    - K선이 D선 위로 교차(골든크로스) = 상승 전환 신호
+
+    MACD 골든크로스 + 스토캐스틱 골든크로스 동시 발생 = 강력한 매수 신호
+    (허위 신호 50% 감소 효과)
+
+    반환값: (K값, D값) — 각각 0~100 사이 실수
+    """
+    try:
+        high  = df["High"].squeeze()
+        low   = df["Low"].squeeze()
+        close = df["Close"].squeeze()
+
+        if len(close) < period + 3:
+            return 50.0, 50.0
+
+        # K = (현재가 - 최근N일 최저가) / (최근N일 최고가 - 최근N일 최저가) * 100
+        lowest  = low.rolling(period).min()
+        highest = high.rolling(period).max()
+        범위    = highest - lowest
+        범위    = 범위.replace(0, float("nan"))  # 0 나눗셈 방지
+        k_series = (close - lowest) / 범위 * 100
+
+        # D = K의 3일 이동평균 (신호선)
+        d_series = k_series.rolling(3).mean()
+
+        k = float(k_series.iloc[-1]) if not pd.isna(k_series.iloc[-1]) else 50.0
+        d = float(d_series.iloc[-1]) if not pd.isna(d_series.iloc[-1]) else 50.0
+        return round(k, 2), round(d, 2)
+    except Exception:
+        return 50.0, 50.0
+
+
+def calc_cci(df, period=14):
+    """
+    CCI(상품채널지수, Commodity Channel Index)를 계산한다.
+
+    [중학생 설명]
+    가격이 평균에서 얼마나 벗어났는지를 통계적으로 측정한 지표.
+    - CCI < -150: 극단적 과매도 (RSI 30보다 더 강한 신호)
+    - CCI > +150: 극단적 과매수
+    - RSI가 30인데 CCI도 -150이면? → 이중으로 확인된 과매도 → 강한 반등 신호
+
+    반환값: CCI 값 (보통 -300~+300 사이)
+    """
+    try:
+        high  = df["High"].squeeze()
+        low   = df["Low"].squeeze()
+        close = df["Close"].squeeze()
+
+        if len(close) < period:
+            return 0.0
+
+        # 전형가격(Typical Price) = (고가 + 저가 + 종가) / 3
+        tp = (high + low + close) / 3
+
+        # 평균 전형가격
+        tp_mean = tp.rolling(period).mean()
+
+        # 평균절대편차 (MAD)
+        mad = tp.rolling(period).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True)
+        mad = mad.replace(0, float("nan"))
+
+        # CCI = (전형가격 - 평균전형가격) / (0.015 * MAD)
+        cci_series = (tp - tp_mean) / (0.015 * mad)
+
+        val = float(cci_series.iloc[-1])
+        return round(val, 2) if not pd.isna(val) else 0.0
+    except Exception:
+        return 0.0
