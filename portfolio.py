@@ -99,3 +99,169 @@ def check_portfolio_alerts(포트폴리오, settings):
                 )
 
     return 알림_목록
+
+
+def check_max_holding_days(settings, 통화_기호_맵=None):
+    """
+    portfolio_signals.txt에서 '보유중' 종목의 보유일수를 확인한다.
+    MAX_HOLDING_DAYS(기본 30일) 초과 시 강제 청산 알림을 반환한다.
+
+    [중학생 설명]
+    트레일링 스탑도 안 걸리고 목표가도 안 오는 종목이 있으면
+    돈이 계속 묶여서 다른 기회를 놓친다.
+    30일이 지나도 청산이 안 됐으면 "이제 팔 때가 됐습니다" 알림을 보낸다.
+    """
+    from datetime import date as _date
+    import os
+
+    MAX_DAYS = int(settings.get("MAX_HOLDING_DAYS", 30))
+    알림_목록 = []
+
+    if not os.path.exists("portfolio_signals.txt"):
+        return 알림_목록
+
+    try:
+        오늘 = _date.today()
+        with open("portfolio_signals.txt", "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(",")
+            if len(parts) < 8:
+                continue
+
+            날짜_str, ticker, name, 점수, 진입가_str, 통화, _, 상태 = parts[:8]
+            if 상태 != "보유중":
+                continue
+
+            try:
+                진입일 = _date.fromisoformat(날짜_str)
+                보유일 = (오늘 - 진입일).days
+                진입가 = float(진입가_str)
+            except Exception:
+                continue
+
+            if 보유일 >= MAX_DAYS:
+                # 현재가 조회
+                from data_loader import get_price_data
+                df = get_price_data(ticker, period="5d")
+                현재가_str = "조회실패"
+                수익률_str = ""
+                if df is not None and len(df) >= 1:
+                    현재가 = float(df["Close"].squeeze().iloc[-1])
+                    수익률 = (현재가 - 진입가) / 진입가 * 100
+                    기호   = "₩" if 통화 == "KRW" else "$"
+                    현재가_str = f"{기호}{현재가:,.0f}"
+                    수익률_str = f" | 수익률: {수익률:+.1f}%"
+
+                알림_목록.append(
+                    f"⏰ *{name}({ticker}) 보유 {보유일}일 경과*\n"
+                    f"  진입가: {진입가:,.0f} → 현재: {현재가_str}{수익률_str}\n"
+                    f"  ※ 최대 보유일({MAX_DAYS}일) 초과 — 청산 검토 권장"
+                )
+
+    except Exception as e:
+        print(f"⚠️ 보유일 확인 오류: {e}")
+
+    return 알림_목록
+
+
+def generate_weekly_report(settings):
+    """
+    매주 일요일: 지난 7일간 신호 발생 종목의 실제 수익률을 집계한다.
+
+    [중학생 설명]
+    "지난 주에 이 시스템이 추천한 종목들이 실제로 올랐는가?"를
+    숫자로 확인한다. 이게 쌓이면 이 시스템이 얼마나 믿을 수 있는지 알 수 있다.
+
+    출력 형식:
+    📊 주간 신호 성과 리포트 (2026-05-05 ~ 2026-05-12)
+    총 7개 신호 | 수익 4개(57%) | 손실 3개(43%)
+    평균 수익률: +3.2% | 최고: +8.1%(AMD) | 최저: -2.4%(INTC)
+    """
+    from datetime import date as _date, timedelta
+    import os
+
+    알림_목록 = []
+    오늘 = _date.today()
+
+    # 일요일에만 실행 (weekday 6 = 일요일)
+    if 오늘.weekday() != 6:
+        return 알림_목록
+
+    if not os.path.exists("portfolio_signals.txt"):
+        return 알림_목록
+
+    일주일전 = 오늘 - timedelta(days=7)
+    결과들 = []
+
+    try:
+        with open("portfolio_signals.txt", "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(",")
+            if len(parts) < 8:
+                continue
+
+            날짜_str, ticker, name, 점수, 진입가_str, 통화, _, 상태 = parts[:8]
+
+            try:
+                신호일 = _date.fromisoformat(날짜_str)
+                진입가 = float(진입가_str)
+            except Exception:
+                continue
+
+            # 지난 7일 신호만
+            if not (일주일전 <= 신호일 <= 오늘):
+                continue
+
+            # 현재가 조회
+            from data_loader import get_price_data
+            df = get_price_data(ticker, period="5d")
+            if df is None or len(df) < 1:
+                continue
+
+            현재가 = float(df["Close"].squeeze().iloc[-1])
+            수익률 = (현재가 - 진입가) / 진입가 * 100
+            결과들.append((ticker, name, 수익률, 신호일))
+
+        if not 결과들:
+            return 알림_목록
+
+        수익_건 = [r for r in 결과들 if r[2] > 0]
+        손실_건 = [r for r in 결과들 if r[2] <= 0]
+        avg = sum(r[2] for r in 결과들) / len(결과들)
+        최고 = max(결과들, key=lambda x: x[2])
+        최저 = min(결과들, key=lambda x: x[2])
+        승률 = len(수익_건) / len(결과들) * 100
+
+        리포트 = (
+            f"📊 *주간 신호 성과 리포트*\n"
+            f"기간: {일주일전} ~ {오늘}\n"
+            f"총 {len(결과들)}개 신호 | "
+            f"수익 {len(수익_건)}개({승률:.0f}%) | "
+            f"손실 {len(손실_건)}개({100-승률:.0f}%)\n"
+            f"평균 수익률: {avg:+.1f}%\n"
+            f"최고: {최고[2]:+.1f}% ({최고[1]}) | "
+            f"최저: {최저[2]:+.1f}% ({최저[1]})\n"
+        )
+
+        # 상세 내역
+        리포트 += "\n상세:\n"
+        for ticker, name, ret, dt in sorted(결과들, key=lambda x: x[2], reverse=True):
+            아이콘 = "🟢" if ret > 0 else "🔴"
+            리포트 += f"  {아이콘} {name}({ticker}): {ret:+.1f}% (신호일 {dt})\n"
+
+        알림_목록.append(리포트)
+
+    except Exception as e:
+        print(f"⚠️ 주간 리포트 생성 오류: {e}")
+
+    return 알림_목록

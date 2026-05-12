@@ -51,6 +51,53 @@ BATCH_SIZE = 10
 MAX_RETRIES = 4
 BASE_DELAY  = 2   # 초 단위 (1→2로 강화: 2→4→8→16초 대기)
 
+# ─────────────────────────────────────────
+# Groq API (Gemini 429 폴백)
+# ─────────────────────────────────────────
+
+def _call_groq(prompt: str, max_tokens: int = 500) -> str:
+    """
+    Groq API로 텍스트를 생성한다. Gemini 429 오류 시 폴백으로 사용.
+
+    [중학생 설명]
+    Groq는 Gemini와 비슷한 AI API인데, 무료 한도가 Gemini보다 2배 많다.
+    분당 30회(Gemini: 15회), 일일 14,400회 무료.
+    Gemini가 "너무 많이 요청했어(429)"라고 하면,
+    자동으로 Groq로 넘어가서 같은 작업을 해준다.
+
+    API 키 발급: https://console.groq.com (무료, 이메일만 필요)
+    GitHub Secrets에 GROQ_API_KEY로 등록
+
+    사용 모델: llama-3.3-70b-versatile (Groq 무료 티어 최고 성능)
+    """
+    import os, requests
+    api_key = os.getenv("GROQ_API_KEY", "")
+    if not api_key:
+        return ""
+
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type":  "application/json",
+            },
+            json={
+                "model":      "llama-3.3-70b-versatile",
+                "messages":   [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": 0.3,
+            },
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return ""
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return ""
+
+
+
 # 번역 결과 캐시: 같은 문장은 API 재호출 없이 재사용
 _TRANSLATION_CACHE: dict[str, str] = {}
 
@@ -102,8 +149,12 @@ def _call_gemini(system_prompt: str, user_content: str, max_output_tokens: int =
                     time.sleep(대기_시간)
                     continue   # 다음 attempt로
 
-                # 마지막 시도도 실패하면 빈 문자열 반환
-                print(f"⚠️ AI 분석 오류 (최대 재시도 초과): {resp.status_code}")
+                # Gemini 최종 실패 → Groq로 폴백
+                print(f"⚠️ Gemini 최대 재시도 초과 → Groq 폴백 시도")
+                groq_결과 = _call_groq(prompt, max_tokens=400)
+                if groq_결과:
+                    print(f"  ✅ Groq 폴백 성공")
+                    return groq_결과
                 return ""
 
             # 그 외 오류(400, 401 등)는 재시도 없이 즉시 반환
