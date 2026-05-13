@@ -105,15 +105,7 @@ _TRANSLATION_CACHE: dict[str, str] = {}
 def _call_gemini(system_prompt: str, user_content: str, max_output_tokens: int = 300) -> str:
     """
     Gemini API를 호출하고 텍스트 응답을 반환한다.
-
-    [중학생 설명]
-    Gemini라는 AI에게 질문을 보내고 답변을 받는 함수다.
-    서버가 바쁘거나(503) 요청이 너무 많으면(429) 실패할 수 있는데,
-    이때 바로 포기하지 않고 잠깐 기다렸다가 다시 시도한다.
-    기다리는 시간은 매번 2배씩 늘어난다 (1초 → 2초 → 4초).
-    이 방식을 '지수 백오프(Exponential Backoff)'라고 부른다.
-
-    API 키 없음 또는 모든 재시도 실패 시 → 빈 문자열 반환 (안전 폴백)
+    실패 시 Groq로 폴백한다.
     """
     load_dotenv()
     api_key = os.getenv("GEMINI_API_KEY")

@@ -557,7 +557,8 @@ def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
     raw_items: list[dict] = []
 
     # ── 소스 1: Gemini Grounding (급등/급락 원인 직접 검색) ──
-    if abs(변동률) >= 2.0:
+    # 변동률 ±1% 이상이면 Gemini Grounding 시도 (기존 ±2% → 더 많은 뉴스 수집)
+    if abs(변동률) >= 1.0:
         gemini_news = _get_news_gemini_grounding(ticker, name, 변동률)
         raw_items.extend(gemini_news)
 
@@ -571,7 +572,7 @@ def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
         raw_items.extend(av_news)
 
     # ── 소스 3: yfinance (폴백) ─────────────────────────────
-    if len(raw_items) < 2:
+    if len(raw_items) < 3:
         yf_news = _get_news_yfinance(ticker)
         raw_items.extend(yf_news)
 
