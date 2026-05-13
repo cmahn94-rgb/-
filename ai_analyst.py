@@ -48,8 +48,8 @@ BATCH_SIZE = 10
 # MAX_RETRIES = 3 → 최대 3번 재시도 (총 4번 시도)
 # BASE_DELAY  = 1 → 첫 대기 시간 1초, 이후 2배씩 증가 (1→2→4초)
 # ─────────────────────────────────────────
-MAX_RETRIES = 4
-BASE_DELAY  = 2   # 초 단위 (1→2로 강화: 2→4→8→16초 대기)
+MAX_RETRIES = 2
+BASE_DELAY  = 1   # 초 단위: 1→2→4초
 
 # ─────────────────────────────────────────
 # Groq API (Gemini 429 폴백)
@@ -151,7 +151,7 @@ def _call_gemini(system_prompt: str, user_content: str, max_output_tokens: int =
 
                 # Gemini 최종 실패 → Groq로 폴백
                 print(f"⚠️ Gemini 최대 재시도 초과 → Groq 폴백 시도")
-                groq_결과 = _call_groq(prompt, max_tokens=400)
+                groq_결과 = _call_groq(f"{system_prompt}\n\n{user_content}", max_tokens=400)
                 if groq_결과:
                     print(f"  ✅ Groq 폴백 성공")
                     return groq_결과
@@ -456,7 +456,7 @@ def translate_to_korean_one_line_batch(texts: list[str]) -> list[str]:
 
         # 배치 사이 3초 대기 → Gemini 무료 분당 15회 한도 대응
         if batch_start + BATCH_SIZE < len(to_translate):
-            time.sleep(3.0)
+            time.sleep(1.5)
 
     # 원래 인덱스 위치에 결과 채우기
     for t, orig_idx in zip(to_translate, index_map):
@@ -513,7 +513,7 @@ def get_ai_signal_reasons_batch(items: list[dict]) -> dict[str, str]:
 
         # 배치 사이 3초 대기 → Gemini 무료 분당 15회 한도 대응
         if batch_start + BATCH_SIZE < len(items):
-            time.sleep(3.0)
+            time.sleep(1.5)
 
     return result_map
 
