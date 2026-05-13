@@ -105,7 +105,9 @@ _TRANSLATION_CACHE: dict[str, str] = {}
 def _call_gemini(system_prompt: str, user_content: str, max_output_tokens: int = 300) -> str:
     """
     Gemini API를 호출하고 텍스트 응답을 반환한다.
-    실패 시 Groq로 폴백한다.
+    서버 과부하(503) 또는 요청 초과(429) 시 지수 백오프로 재시도하고,
+    최종 실패 시 Groq API(llama-3.3-70b)로 자동 폴백한다.
+    API 키 없음 또는 모든 시도 실패 시 빈 문자열을 반환한다.
     """
     load_dotenv()
     api_key = os.getenv("GEMINI_API_KEY")
