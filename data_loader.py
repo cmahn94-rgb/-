@@ -540,14 +540,148 @@ def get_weekly_data(ticker: str, period: str = "2y") -> pd.DataFrame | None:
     except Exception:
         return None
 
+
+# ─────────────────────────────────────────
+# 뉴스 소스 4: GNews API (한국주식 포함 전종목)
+# ─────────────────────────────────────────
+
+def _get_news_gnews(ticker: str, name: str) -> list[dict]:
+    """
+    GNews API로 종목 관련 뉴스를 가져온다.
+
+    [핵심 장점]
+    - Google News 기반 → 한국어 뉴스 완벽 지원
+    - 한국주식(삼성전자, SK하이닉스 등) 뉴스 가능 (AV는 한국주식 불가)
+    - 100회/일 무료, API 키 발급 30초 (https://gnews.io)
+    - GitHub Secrets: GNEWS_API_KEY
+
+    쿼리 전략:
+    - 한국주식: '{종목명} 주가' 한국어 검색
+    - 미국주식: '{ticker} stock' 영어 검색
+    """
+    api_key = os.getenv("GNEWS_API_KEY", "")
+    if not api_key:
+        return []
+
+    try:
+        # 한국/미국 주식에 따라 검색어와 언어 설정
+        if ticker.endswith((".KS", ".KQ")):
+            query = f"{name} 주가 주식"
+            lang  = "ko"
+            country = "kr"
+        else:
+            query = f"{ticker} stock earnings"
+            lang  = "en"
+            country = "us"
+
+        params = {
+            "q":        query,
+            "lang":     lang,
+            "country":  country,
+            "max":      5,
+            "sortby":   "publishedAt",   # 최신순
+            "token":    api_key,
+        }
+        resp = requests.get(
+            "https://gnews.io/api/v4/search",
+            params=params, timeout=10
+        )
+        if resp.status_code != 200:
+            return []
+
+        articles = resp.json().get("articles", [])
+        if not articles:
+            return []
+
+        result = []
+        for art in articles[:5]:
+            title   = art.get("title",       "") or ""
+            desc    = art.get("description", "") or ""
+            if not title:
+                continue
+            result.append({
+                "title":   title,
+                "summary": desc[:150],
+                "source":  "gnews",
+            })
+        return result
+
+    except Exception as e:
+        print(f"⚠️ GNews 뉴스 오류 ({ticker}): {e}")
+        return []
+
+
+# ─────────────────────────────────────────
+# 뉴스 소스 5: NewsAPI.org (GNews 폴백)
+# ─────────────────────────────────────────
+
+def _get_news_newsapi(ticker: str, name: str) -> list[dict]:
+    """
+    NewsAPI.org로 종목 관련 뉴스를 가져온다.
+
+    [특징]
+    - 100회/일 무료 (GNews 한도 초과 시 폴백)
+    - 한국어 검색 지원
+    - API 키: https://newsapi.org (이메일 가입 즉시)
+    - GitHub Secrets: NEWSAPI_KEY
+    """
+    api_key = os.getenv("NEWSAPI_KEY", "")
+    if not api_key:
+        return []
+
+    try:
+        if ticker.endswith((".KS", ".KQ")):
+            query = f"{name} 주식"
+            lang  = "ko"
+        else:
+            query = f"{ticker} stock"
+            lang  = "en"
+
+        params = {
+            "q":        query,
+            "language": lang,
+            "sortBy":   "publishedAt",
+            "pageSize": 5,
+            "apiKey":   api_key,
+        }
+        resp = requests.get(
+            "https://newsapi.org/v2/everything",
+            params=params, timeout=10
+        )
+        if resp.status_code != 200:
+            return []
+
+        articles = resp.json().get("articles", [])
+        if not articles:
+            return []
+
+        result = []
+        for art in articles[:5]:
+            title = art.get("title",       "") or ""
+            desc  = art.get("description", "") or ""
+            if not title or title == "[Removed]":
+                continue
+            result.append({
+                "title":   title,
+                "summary": desc[:150],
+                "source":  "newsapi",
+            })
+        return result
+
+    except Exception as e:
+        print(f"⚠️ NewsAPI 뉴스 오류 ({ticker}): {e}")
+        return []
+
 def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
     """
     3중 소스 폴백으로 뉴스를 수집한다.
 
-    [수집 우선순위]
-    1) 변동률 ±2% 이상이면 → Gemini Grounding 검색 (가장 관련성 높음)
-    2) Alpha Vantage API → 감성 점수 포함된 정제된 뉴스
-    3) yfinance → 기존 방식 (폴백)
+    [수집 우선순위 — 5중 폴백]
+    1) Gemini Grounding → 변동률 ±2% 이상인 날, 급등/급락 이유 실시간 검색
+    2) Alpha Vantage   → 미국주식 전용, 감성 점수 포함 (25회/일)
+    3) GNews           → 한국주식 포함 전종목, Google News 기반 (100회/일)
+    4) NewsAPI         → GNews 한도 초과 시 폴백 (100회/일)
+    5) yfinance        → 최후 수단 (API 불안정)
 
     결과는 이벤트 키워드가 있는 뉴스를 앞으로 정렬해서 반환한다.
     """
@@ -572,8 +706,26 @@ def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
             print(f"  📰 Alpha Vantage 뉴스: {ticker} {len(av_news)}개")
         raw_items.extend(av_news)
 
-    # ── 소스 3: yfinance (폴백) ─────────────────────────────
+    # ── 소스 3: GNews (한국주식 포함 전종목) ─────────────────
+    # GNews는 Google News 기반으로 한국어 뉴스를 직접 검색한다.
+    # Alpha Vantage가 지원 안 하는 한국주식 뉴스를 여기서 채운다.
     if len(raw_items) < 3:
+        gn_news = _get_news_gnews(ticker, name)
+        if gn_news:
+            print(f"  📰 GNews: {ticker} {len(gn_news)}개")
+        raw_items.extend(gn_news)
+
+    # ── 소스 4: NewsAPI (GNews 폴백) ────────────────────────
+    if len(raw_items) < 3:
+        na_news = _get_news_newsapi(ticker, name)
+        if na_news:
+            print(f"  📰 NewsAPI: {ticker} {len(na_news)}개")
+        raw_items.extend(na_news)
+
+    # ── 소스 5: yfinance (최후 수단) ────────────────────────
+    # yfinance는 Yahoo Finance API 불안정으로 자주 실패.
+    # GNews/NewsAPI로도 못 채웠을 때만 시도한다.
+    if len(raw_items) < 2:
         yf_news = _get_news_yfinance(ticker)
         raw_items.extend(yf_news)
 

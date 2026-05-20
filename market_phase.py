@@ -1,27 +1,26 @@
 """
 market_phase.py — 시장 국면 5단계 감지 + 국면별 동적 임계값
 =============================================================
-[참고 봇(hybrid_trading_bot)의 핵심 아이디어 도입]
+[v2 수정 내역]
 
-■ 문제: 고정 BUY_SCORE_THRESHOLD=4의 부작용
-  - 급등장(강한상승): 4점 기준이 너무 높아 신호 0개 → 기회 놓침
-  - 패닉장(급락): 4점 기준이 너무 낮아 위험한 종목도 진입
+🔴 버그 수정:
+  1) ^KS200 → ^KS11 통일 (KS200은 yfinance 불안정, bear_score와 불일치)
+  2) ^VKOSPI → ^VIX 대체 (VKOSPI yfinance 지원 불안정 → vix=0 고착 방지)
+  3) ma20_5d iloc[-6] → 안전한 인덱스 접근 + nan 방어 코드 추가
+  4) _calc_bear_score() 중복 다운로드 제거 → 데이터 재활용으로 통합
 
-■ 해결: 국면에 따라 임계값을 자동으로 조정
-  강한상승 → 2점 (기회 포착 우선)
-  완만한상승 → 3점
-  횡보 → 4점
-  조정하락 → 5점
-  급락패닉 → 6점 (거의 진입 안 함)
-
-■ 국면 판단 기준:
-  KOSPI/S&P500의 MA20, MA60, RSI, VIX를 복합 분석
-  → 기존 마켓 레짐 필터(4중 하락 체크)와 통합
+🟡 설계 개선:
+  1) KR/US 시장 분리 감지: 23:30 미국장은 S&P500 기준 국면 별도 적용
+  2) 횡보 조건 완화: MA 차이 1.5%→3%, RSI 범위 40~55→38~58
+  3) bear_score 1개일 때 STRONG_BULL 억제 로직 추가
+  4) API 호출 횟수 5~6회 → 3회로 축소 (실행 시간 단축)
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from zoneinfo import ZoneInfo
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -35,7 +34,6 @@ class Phase(Enum):
     PANIC       = "🔴 급락패닉"
 
 
-# 국면별 설정
 PHASE_CONFIG = {
     Phase.STRONG_BULL: {"score_threshold": 2, "description": "강한 상승장 — 모멘텀 전략, 임계값 완화"},
     Phase.MILD_BULL:   {"score_threshold": 3, "description": "완만한 상승 — 추세추종 + 눌림목"},
@@ -48,84 +46,210 @@ PHASE_CONFIG = {
 @dataclass
 class PhaseResult:
     phase: Phase
-    score_threshold: int   # 이 국면에서 사용할 매수 임계값
+    score_threshold: int
     description: str
     ma20: float = 0.0
     ma60: float = 0.0
     rsi:  float = 0.0
     vix:  float = 0.0
-    bear_score: int = 0    # 하락 신호 개수 (기존 마켓 레짐 필터와 통합)
+    bear_score: int = 0
+    usdkrw: float = 0.0        # USD/KRW 환율 (0이면 수집 실패)
+    usdkrw_trend: str = ""     # 상승/하락/횡보
+    # 추가: 미국장 국면 (23:30 실행 시 US 기준 병렬 판단)
+    us_phase: Phase | None = None
 
 
 def detect_market_phase(market: str = "KR") -> PhaseResult:
     """
     현재 시장 국면을 감지하고 적절한 매수 임계값을 반환한다.
 
-    [중학생 설명]
-    주식 시장에는 계절처럼 '국면'이 있다.
-    봄(강한상승), 여름(완만한상승), 가을(횡보), 겨울(조정), 혹한(패닉)처럼
-    국면마다 다른 전략이 필요하다.
-    지금이 봄이라면 조금 느슨하게 사도 되지만,
-    혹한이라면 아주 확실한 신호가 있을 때만 사야 한다.
+    [개선 내용]
+    - KR 실행: KOSPI(^KS11) 기준 국면 감지
+    - US 실행 (23:30): S&P500 기준 국면도 함께 감지 → 더 엄격한 쪽 적용
+    - VIX: ^VKOSPI 불안정 → ^VIX(미국) 사용 (글로벌 공포 지수)
+    - API 호출 통합: 중복 다운로드 제거 (5~6회 → 3회)
 
     반환값: PhaseResult (국면 + 임계값 + 세부 지표)
     """
     import yfinance as yf
     from indicators import calc_rsi as _calc_rsi
 
-    # 시장별 지수 설정
-    if market == "KR":
-        idx_ticker = "^KS200"
-        vix_ticker = "^VKOSPI"
-    else:
-        idx_ticker = "^GSPC"
-        vix_ticker = "^VIX"
-
     ma20 = ma60 = rsi = vix = 0.0
     bear_score = 0
+    phase = Phase.SIDEWAYS  # 기본값 (오류 시 보수적)
+    us_phase = None
 
     try:
-        # 지수 데이터
-        df = yf.download(idx_ticker, period="1y", progress=False, auto_adjust=True)
-        if df is not None and len(df) >= 60:
-            close = df["Close"].squeeze()
-            ma20 = float(close.rolling(20).mean().iloc[-1])
-            ma60 = float(close.rolling(60).mean().iloc[-1])
-            ma20_5d = float(close.rolling(20).mean().iloc[-6])
-            current = float(close.iloc[-1])
-            rsi = float(_calc_rsi(close, 14).iloc[-1])
+        # ── 1) 공통: VIX + S&P500 한 번에 다운로드 ──────────────
+        # ^VIX: 미국 변동성지수 (VKOSPI보다 훨씬 안정적)
+        # ^GSPC: S&P500 (글로벌 시장 기준점)
+        vix_df = yf.download("^VIX",  period="3mo", progress=False, auto_adjust=True)
+        sp_df  = yf.download("^GSPC", period="1y",  progress=False, auto_adjust=True)
 
-            # VIX
-            vix_df = yf.download(vix_ticker, period="1mo", progress=False, auto_adjust=True)
-            if vix_df is not None and len(vix_df) > 0:
-                vix = float(vix_df["Close"].squeeze().iloc[-1])
+        if vix_df is not None and len(vix_df) > 0:
+            vix_close = vix_df["Close"].squeeze()
+            vix = float(vix_close.iloc[-1]) if not pd.isna(vix_close.iloc[-1]) else 0.0
 
-            # 기존 하락 레짐 점수 계산 (4중 필터)
-            bear_score = _calc_bear_score()
+        # ── 2) KR 기준 국면 ──────────────────────────────────────
+        # ^KS200 대신 ^KS11 사용 (더 안정적, bear_score와 일치)
+        ks_df = yf.download("^KS11", period="1y", progress=False, auto_adjust=True)
 
-            # 국면 분류
+        if ks_df is not None and len(ks_df) >= 60:
+            close = ks_df["Close"].squeeze()
+            ma20  = _safe_float(close.rolling(20).mean().iloc[-1])
+            ma60  = _safe_float(close.rolling(60).mean().iloc[-1])
+            # [버그3 수정] iloc[-6] 대신 안전하게 최근 6일 평균의 5일 전 값 사용
+            ma20_series = close.rolling(20).mean()
+            ma20_5d = _safe_float(
+                ma20_series.iloc[-6] if len(ma20_series) >= 6 else ma20_series.iloc[0]
+            )
+            current = _safe_float(close.iloc[-1])
+            rsi_series = _calc_rsi(close, 14)
+            rsi = _safe_float(rsi_series.iloc[-1])
+
+            # [버그4 수정] bear_score를 이미 다운로드한 데이터로 계산 (중복 제거)
+            bear_score = _calc_bear_score_from_data(sp_df, ks_df, vix_df)
+
+            # USD/KRW 환율 수집 + bear_score 보정
+            usdkrw, usdkrw_trend = _get_usdkrw()
+            if usdkrw > 0:
+                if usdkrw >= 1400 and usdkrw_trend == "상승":
+                    bear_score += 1  # 환율 급등 = 외국인 이탈 압력
+                    print(f"  ⚠️ 환율 {usdkrw:,.0f}원 상승 추세 → bear_score +1")
+                elif usdkrw <= 1280 and usdkrw_trend == "하락":
+                    bear_score = max(0, bear_score - 1)  # 환율 하락 = 외국인 유입
+                    print(f"  ✅ 환율 {usdkrw:,.0f}원 하락 추세 → bear_score -1")
+
             phase = _classify(current, ma20, ma60, ma20_5d, rsi, vix, bear_score)
         else:
-            # 데이터 없으면 기본값 (횡보로 보수적 처리)
+            print("⚠️ KOSPI 데이터 부족 → 횡보 기본값 적용")
             phase = Phase.SIDEWAYS
+
+        # ── 3) US 기준 국면 (미국장 시간대에만) ─────────────────
+        # 23:30 KST = 미국 장 중반. 미국 종목 분석 시 US 국면도 체크.
+        now_h = datetime.now(ZoneInfo("Asia/Seoul")).hour
+        is_us_session = (now_h >= 22 or now_h < 6)
+
+        if is_us_session and sp_df is not None and len(sp_df) >= 60:
+            sp_close = sp_df["Close"].squeeze()
+            sp_ma20  = _safe_float(sp_close.rolling(20).mean().iloc[-1])
+            sp_ma60  = _safe_float(sp_close.rolling(60).mean().iloc[-1])
+            sp_ma20_series = sp_close.rolling(20).mean()
+            sp_ma20_5d = _safe_float(
+                sp_ma20_series.iloc[-6] if len(sp_ma20_series) >= 6 else sp_ma20_series.iloc[0]
+            )
+            sp_current = _safe_float(sp_close.iloc[-1])
+            sp_rsi = _safe_float(_calc_rsi(sp_close, 14).iloc[-1])
+            us_phase = _classify(sp_current, sp_ma20, sp_ma60, sp_ma20_5d, sp_rsi, vix, bear_score)
+
+            # 미국장에서는 KR/US 중 더 보수적인 국면 적용
+            phase = _more_conservative(phase, us_phase)
 
     except Exception as e:
         print(f"⚠️ 시장 국면 감지 오류: {e}")
-        phase = Phase.SIDEWAYS  # 오류 시 보수적 기본값
+        phase = Phase.SIDEWAYS
 
     cfg = PHASE_CONFIG[phase]
+    # usdkrw는 try 블록 안에서만 설정되므로 기본값 처리
+    _usdkrw = locals().get("usdkrw", 0.0)
+    _usdkrw_trend = locals().get("usdkrw_trend", "횡보")
     return PhaseResult(
         phase=phase,
         score_threshold=cfg["score_threshold"],
         description=cfg["description"],
         ma20=ma20, ma60=ma60, rsi=rsi, vix=vix,
         bear_score=bear_score,
+        usdkrw=_usdkrw,
+        usdkrw_trend=_usdkrw_trend,
+        us_phase=us_phase,
     )
 
 
+
+
+def _get_usdkrw() -> tuple[float, str]:
+    """
+    USD/KRW 환율과 추세를 수집한다.
+
+    [중학생 설명]
+    환율은 외국인 투자자가 한국 주식을 살 때 얼마나 불리한지를 보여준다.
+    원화가 약해지면(환율 상승) 외국인이 한국 주식을 팔고 나가는 경향이 있다.
+    반대로 원화가 강해지면(환율 하락) 외국인이 돈을 더 벌 수 있어 들어오는 경향.
+
+    환율 기준 국면 보정:
+    - 환율 1,400원 이상 + 상승 추세 → bear_score +1 (외국인 이탈 압력)
+    - 환율 1,280원 이하 + 하락 추세 → bear_score -1 (외국인 유입 지지)
+    - 그 외                         → bear_score 0 (중립)
+
+    수집 순서: yfinance(KRW=X) → exchangerate-api.com (무료, 키 불필요)
+    반환값: (환율 숫자, "상승"/"하락"/"횡보")
+    """
+    import yfinance as yf
+    import requests
+
+    rate = 0.0
+    trend = "횡보"
+
+    # ── 소스 1: yfinance ──────────────────────────────────
+    try:
+        df = yf.download("KRW=X", period="1mo", progress=False, auto_adjust=True)
+        if df is not None and len(df) >= 5:
+            close = df["Close"].squeeze()
+            rate  = _safe_float(close.iloc[-1])
+            # 5일 전 대비 추세 판단
+            prev  = _safe_float(close.iloc[-6] if len(close) >= 6 else close.iloc[0])
+            if rate > 0 and prev > 0:
+                change = (rate - prev) / prev * 100
+                trend = "상승" if change > 0.5 else ("하락" if change < -0.5 else "횡보")
+            if rate > 100:  # 정상 범위 확인 (KRW는 1000~1500 사이)
+                print(f"  💱 USD/KRW (yfinance): {rate:,.1f}원 ({trend})")
+                return rate, trend
+    except Exception:
+        pass
+
+    # ── 소스 2: exchangerate-api.com (무료, 키 불필요) ─────
+    try:
+        resp = requests.get(
+            "https://api.exchangerate-api.com/v4/latest/USD",
+            timeout=8
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            rate = float(data.get("rates", {}).get("KRW", 0))
+            # 이전 환율은 별도 요청이 필요해 추세는 "횡보"로 기본 설정
+            # (단일 시점 데이터라 추세 판단 불가)
+            if rate > 100:
+                print(f"  💱 USD/KRW (exchangerate-api): {rate:,.1f}원")
+                return rate, "횡보"
+    except Exception:
+        pass
+
+    print("  ⚠️ USD/KRW 환율 수집 실패 → 국면 판단에서 제외")
+    return 0.0, "횡보"
+
+def _safe_float(val) -> float:
+    """NaN/None/Series를 안전하게 float으로 변환. 실패 시 0.0 반환."""
+    try:
+        v = float(val)
+        return 0.0 if (v != v) else v  # nan 체크
+    except Exception:
+        return 0.0
+
+
 def _classify(price, ma20, ma60, ma20_prev, rsi, vix, bear_score) -> Phase:
-    """국면을 분류한다."""
-    ma20_rising = ma20 > ma20_prev * 1.001
+    """
+    국면을 분류한다.
+
+    [개선 내용]
+    - bear_score=1 이어도 RSI/VIX 조건 추가 체크 (STRONG_BULL 억제)
+    - 횡보 조건 완화: MA 차이 1.5%→3%, RSI 38~58 (기존 40~55)
+    - 모든 인자 0.0 시 SIDEWAYS 반환 (방어)
+    """
+    # 모든 값이 0이면 데이터 없는 것 → 기본값
+    if ma20 == 0.0 and ma60 == 0.0:
+        return Phase.SIDEWAYS
+
+    ma20_rising = (ma20 > ma20_prev * 1.001) if ma20_prev > 0 else False
 
     # 복합 하락 신호 2개 이상 → 패닉 또는 조정
     if bear_score >= 2:
@@ -133,15 +257,27 @@ def _classify(price, ma20, ma60, ma20_prev, rsi, vix, bear_score) -> Phase:
             return Phase.PANIC
         return Phase.CORRECTION
 
+    # 극단적 패닉: MA60 아래 + RSI 과매도 + VIX 급등
     if price < ma60 and rsi < 30 and vix > 25:
         return Phase.PANIC
-    if price < ma20 or (ma20 < ma60 * 0.99):
+
+    # 조정: MA20 아래 OR MA20이 MA60 아래로 꺾임
+    if price > 0 and ma20 > 0 and (price < ma20 or (ma60 > 0 and ma20 < ma60 * 0.99)):
         return Phase.CORRECTION
 
-    # 횡보: MA20-MA60 차이가 1.5% 미만이고 RSI 40~55
-    if abs(ma20 - ma60) / ma60 < 0.015 and 40 <= rsi <= 55:
+    # [설계1 개선] bear_score=1이면 STRONG_BULL 억제
+    if bear_score >= 1:
+        if price > ma20 > ma60:
+            if rsi > 60 and ma20_rising:
+                return Phase.MILD_BULL  # STRONG_BULL 대신 MILD_BULL
+            return Phase.MILD_BULL
         return Phase.SIDEWAYS
 
+    # [설계4 개선] 횡보: 조건 완화 (MA 차이 3%, RSI 38~58)
+    if ma60 > 0 and abs(ma20 - ma60) / ma60 < 0.030 and 38 <= rsi <= 58:
+        return Phase.SIDEWAYS
+
+    # 상승 구간
     if price > ma20 > ma60:
         if rsi > 60 and ma20_rising:
             return Phase.STRONG_BULL
@@ -150,24 +286,72 @@ def _classify(price, ma20, ma60, ma20_prev, rsi, vix, bear_score) -> Phase:
     return Phase.SIDEWAYS
 
 
-def _calc_bear_score() -> int:
-    """기존 마켓 레짐 필터: 4개 지표 중 하락 신호 개수를 반환"""
-    import yfinance as yf
+def _more_conservative(phase_kr: Phase, phase_us: Phase | None) -> Phase:
+    """
+    KR과 US 국면 중 더 보수적인(임계값 높은) 쪽을 반환한다.
+
+    [이유]
+    미국장(23:30) 실행 시 나스닥이 폭락해도 KOSPI 기준으로만 판단하면
+    MILD_BULL이 나와 미국 종목에 위험하게 진입할 수 있다.
+    두 국면 중 더 엄격한 쪽을 적용해 안전성을 높인다.
+    """
+    if phase_us is None:
+        return phase_kr
+    # 임계값이 높을수록 보수적
+    kr_thr = PHASE_CONFIG[phase_kr]["score_threshold"]
+    us_thr = PHASE_CONFIG[phase_us]["score_threshold"]
+    return phase_kr if kr_thr >= us_thr else phase_us
+
+
+def _calc_bear_score_from_data(
+    sp_df: pd.DataFrame | None,
+    ks_df: pd.DataFrame | None,
+    vix_df: pd.DataFrame | None,
+) -> int:
+    """
+    이미 다운로드한 데이터로 하락 레짐 점수를 계산한다.
+    [버그4 수정] 기존 _calc_bear_score()의 중복 다운로드 제거.
+    [버그4 수정] nan 안전 처리 추가.
+    """
     score = 0
     try:
-        sp = yf.download("^GSPC", period="1y",  progress=False, auto_adjust=True)["Close"].squeeze()
-        ks = yf.download("^KS11", period="1y",  progress=False, auto_adjust=True)["Close"].squeeze()
-        vx = yf.download("^VIX",  period="3mo", progress=False, auto_adjust=True)["Close"].squeeze()
-
-        if len(sp) >= 200 and float(sp.iloc[-1]) < float(sp.rolling(200).mean().iloc[-1]) * 0.95:
-            score += 1
-        if len(ks) >= 200 and float(ks.iloc[-1]) < float(ks.rolling(200).mean().iloc[-1]) * 0.95:
-            score += 1
-        if len(vx) >= 20:
-            cur_vix = float(vx.iloc[-1])
-            avg_vix = float(vx.rolling(20).mean().iloc[-1])
-            if cur_vix > 30 or cur_vix > avg_vix * 1.3:
+        # S&P500: 현재가 < 200일 평균 * 0.95
+        if sp_df is not None and len(sp_df) >= 200:
+            sp = sp_df["Close"].squeeze()
+            sp_ma200 = sp.rolling(200).mean()
+            cur  = _safe_float(sp.iloc[-1])
+            ma200 = _safe_float(sp_ma200.iloc[-1])
+            if cur > 0 and ma200 > 0 and cur < ma200 * 0.95:
                 score += 1
-    except Exception:
-        pass
+
+        # KOSPI: 현재가 < 200일 평균 * 0.95
+        if ks_df is not None and len(ks_df) >= 200:
+            ks = ks_df["Close"].squeeze()
+            ks_ma200 = ks.rolling(200).mean()
+            cur  = _safe_float(ks.iloc[-1])
+            ma200 = _safe_float(ks_ma200.iloc[-1])
+            if cur > 0 and ma200 > 0 and cur < ma200 * 0.95:
+                score += 1
+
+        # VIX: 현재 VIX > 30 또는 20일 평균의 1.3배 이상
+        if vix_df is not None and len(vix_df) >= 20:
+            vx = vix_df["Close"].squeeze()
+            cur_vix = _safe_float(vx.iloc[-1])
+            avg_vix = _safe_float(vx.rolling(20).mean().iloc[-1])
+            if cur_vix > 0 and (cur_vix > 30 or (avg_vix > 0 and cur_vix > avg_vix * 1.3)):
+                score += 1
+
+    except Exception as e:
+        print(f"⚠️ bear_score 계산 오류: {e}")
+
     return score
+
+
+# 하위 호환성 유지 (기존 코드가 _calc_bear_score()를 직접 호출하는 경우 대비)
+def _calc_bear_score() -> int:
+    """기존 호출 호환용. 새 코드에서는 _calc_bear_score_from_data() 사용."""
+    import yfinance as yf
+    sp_df  = yf.download("^GSPC", period="1y",  progress=False, auto_adjust=True)
+    ks_df  = yf.download("^KS11", period="1y",  progress=False, auto_adjust=True)
+    vix_df = yf.download("^VIX",  period="3mo", progress=False, auto_adjust=True)
+    return _calc_bear_score_from_data(sp_df, ks_df, vix_df)
