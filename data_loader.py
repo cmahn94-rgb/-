@@ -511,6 +511,47 @@ def get_today_open(ticker: str) -> float | None:
 
 
 
+
+def bulk_download_weekly(tickers, period="2y", chunk_size=50):
+    """
+    주간봉 데이터를 미리 일괄 다운로드해서 캐시에 저장한다.
+    
+    [이유]
+    기존엔 calc_signals()가 종목마다 get_weekly_data()를 개별 호출해서
+    103개 종목 × 2년치 주간봉 = 실행 시간이 늘어났다.
+    이 함수를 run_analysis() 시작 시 한 번 호출하면
+    이후 get_weekly_data()는 캐시에서 즉시 반환한다.
+    """
+    yf_tickers = [t for t in tickers
+                  if not _is_upbit_ticker(t)]
+    if not yf_tickers:
+        return
+
+    for i in range(0, len(yf_tickers), chunk_size):
+        chunk = yf_tickers[i:i + chunk_size]
+        chunk_str = " ".join(chunk)
+        try:
+            import yfinance as yf
+            df_all = yf.download(
+                chunk_str, period=period, interval="1wk",
+                progress=False, auto_adjust=True, group_by="ticker",
+            )
+            for ticker in chunk:
+                cache_key = f"{ticker}_{period}_weekly"
+                if cache_key in _cache:
+                    continue
+                try:
+                    if len(chunk) == 1:
+                        df = df_all
+                    else:
+                        df = df_all[ticker] if ticker in df_all.columns.get_level_values(0) else None
+                    if df is not None and not df.empty:
+                        _cache[cache_key] = df
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"⚠️ 주간봉 일괄 다운로드 오류: {e}")
+
 def get_weekly_data(ticker: str, period: str = "2y") -> pd.DataFrame | None:
     """
     주간봉(Weekly) 데이터를 가져온다.

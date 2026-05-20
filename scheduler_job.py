@@ -27,7 +27,7 @@ from config        import load_settings
 from stocks_loader import load_stocks, load_portfolio
 from signals       import get_market_regime, calc_signals, calc_sell_signal, run_backtest, run_backtest_walkforward, calc_position_size
 from market_phase  import detect_market_phase
-from data_loader   import get_price_data, get_news_summary, clear_cache, bulk_download, get_today_open
+from data_loader   import get_price_data, get_news_summary, clear_cache, bulk_download, bulk_download_weekly, get_today_open
 from portfolio     import check_portfolio_alerts, check_max_holding_days, generate_weekly_report
 from telegram_bot  import send_telegram
 from ai_analyst    import (
@@ -657,7 +657,10 @@ def _record_signals(신호_종목_요약: list):
         return
     try:
         오늘 = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
-        with open("portfolio_signals.txt", "a", encoding="utf-8") as f:
+        import os as _os2
+        _sp = _os2.path.join(_os2.path.dirname(_os2.path.abspath(__file__)),
+                             "portfolio_signals.txt")
+        with open(_sp, "a", encoding="utf-8") as f:
             for s in 신호_종목_요약:
                 ticker = s.get("ticker",  "")
                 name   = s.get("name",    "")
@@ -708,9 +711,26 @@ def run_analysis(include_crypto=True):
     bulk_download(전체_티커, period="5d")
     print(f"  ✅ 사전 다운로드 완료")
 
+    # 주간봉 데이터 일괄 사전 다운로드 (실행 시간 단축)
+    # 기존: calc_signals()가 종목마다 개별 다운로드 → 느림
+    # 개선: 한 번에 다운로드 → 이후 캐시에서 즉시 반환
+    print("  🚀 주간봉 데이터 사전 다운로드 중...")
+    bulk_download_weekly(전체_티커, period="2y")
+    print("  ✅ 주간봉 다운로드 완료")
+
+    # ── VIX 1회 조회 → settings에 주입 (중복 다운로드 방지) ────
+    # 기존: calc_signals()가 103개 종목마다 ^VIX를 개별 다운로드
+    # 개선: 여기서 1회만 조회 후 settings["CURRENT_VIX"]에 저장
+    try:
+        _vix_df = get_price_data("^VIX", period="5d")
+        settings["CURRENT_VIX"] = float(
+            _vix_df["Close"].squeeze().iloc[-1]
+        ) if _vix_df is not None and len(_vix_df) > 0 else 15.0
+    except Exception:
+        settings["CURRENT_VIX"] = 15.0
+    print(f"  💹 VIX: {settings['CURRENT_VIX']:.1f}")
+
     # ── 시장 국면 감지 → 동적 임계값 설정 ──────────────────────
-    # 고정 BUY_SCORE_THRESHOLD 대신 국면에 따라 2~6점으로 자동 조정
-    # 강한상승=2점, 완만한상승=3점, 횡보=4점, 조정=5점, 패닉=6점
     print("  🔭 시장 국면 감지 중...")
     try:
         phase_result = detect_market_phase(market="KR")

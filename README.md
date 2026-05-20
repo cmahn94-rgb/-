@@ -178,8 +178,9 @@
 │   └── scheduler_job.py   전체 실행 흐름 조율, 리포트 조립
 │
 ├── 📡 데이터·AI
-│   ├── data_loader.py     주가 데이터 + 뉴스 수집 (3중 폴백)
-│   └── ai_analyst.py      Gemini AI 분석 + Groq 폴백 + 번역
+│   ├── data_loader.py     주가 데이터 + 뉴스 수집 (5중 폴백)
+│   ├── ai_analyst.py      Gemini AI 분석 + Groq 폴백 + 번역
+│   └── fundamental.py     기본적 분석 5가지 (PER·ROE·목표주가·실적발표·FCF)
 │
 ├── 💼 포트폴리오
 │   ├── portfolio.py       손익 알림, 최대보유일, 주간 성과 리포트
@@ -242,8 +243,11 @@ GitHub 레포지토리 페이지에서
 | `TELEGRAM_TOKEN` | 텔레그램 봇 토큰 |
 | `TELEGRAM_CHAT_ID` | 내 텔레그램 채팅 ID |
 | `GEMINI_API_KEY` | Gemini API 키 |
-| `GROQ_API_KEY` | Groq API 키 (권장) |
-| `ALPHAVANTAGE_API_KEY` | Alpha Vantage 키 (선택) |
+| `GROQ_API_KEY` | Groq API 키 (권장 — Gemini 429 방지) |
+| `ALPHAVANTAGE_API_KEY` | Alpha Vantage 키 (선택 — 미국주식 뉴스) |
+| `GNEWS_API_KEY` | GNews API 키 (선택 — 한국주식 뉴스) |
+| `NEWSAPI_KEY` | NewsAPI 키 (선택 — 뉴스 폴백) |
+| `DART_API_KEY` | DART API 키 (선택 — 한국주식 기본적 분석) |
 
 > **텔레그램 채팅 ID 확인하는 법**
 > 1. 만든 봇에 아무 메시지나 보내기
@@ -429,15 +433,16 @@ Gemini 실패 시 자동으로 Groq(분당 30회, 무료)로 넘어갑니다.
 
 **Q. 알림에 뉴스가 안 보여요.**
 
-뉴스는 3중 폴백으로 작동합니다.
+뉴스는 5중 폴백으로 작동합니다.
 
 1. Gemini Grounding (변동률 ±2% 이상 종목만)
-2. Alpha Vantage (미국 주식만, `ALPHAVANTAGE_API_KEY` 필요)
-3. yfinance (불안정, 최후 수단)
+2. Alpha Vantage (미국 주식 전용, `ALPHAVANTAGE_API_KEY` 필요)
+3. GNews (한국·미국 전종목, `GNEWS_API_KEY` 필요 — [gnews.io](https://gnews.io) 무료)
+4. NewsAPI (GNews 폴백, `NEWSAPI_KEY` 필요 — [newsapi.org](https://newsapi.org) 무료)
+5. yfinance (최후 수단, 불안정)
 
-한국 주식 뉴스는 Alpha Vantage가 지원하지 않아 yfinance에 의존합니다.
-Yahoo Finance API가 자주 바뀌어서 뉴스가 0개로 오는 경우가 있습니다.
-이건 외부 서비스 문제라 코드 수정으로 완전히 해결하기 어렵습니다.
+한국 주식 뉴스는 GNews(Google News 기반 한국어 검색)로 대부분 해결됩니다.
+`GNEWS_API_KEY`가 없으면 yfinance에만 의존해 뉴스가 0개로 올 수 있습니다.
 
 ---
 
@@ -538,6 +543,75 @@ SK하이닉스 (000660.KS) | ADX 32🔥
 | v2.0 | 6조건 점수제, ATR 포지션사이징, 볼린저·MACD·ADX 추가 |
 | v3.0 | 우선순위 점수(0~100), TOP3, 뉴스 3중 폴백, Walk-forward 백테스트 |
 | v4.0 | 시장 국면 5단계, 스토캐스틱·CCI 보너스, Groq 폴백, 최대보유일·주간리포트 |
+| v4.1 | 기본적 분석 5가지(PER·목표주가·실적발표·ROE·FCF), DART 연동, 뉴스 5중 폴백 |
+| v4.2 | 트레일링 스탑 실전 알림, Walk-forward 필터 완성, 주간봉 bulk 캐시, 버그 7개 수정 |
+
+---
+
+## 11. 수정 내역 (Changelog)
+
+### v4.2 — 코딩 품질 개선 및 버그 수정
+
+#### 🔴 버그 수정
+
+| 파일 | 수정 내용 |
+|------|---------|
+| `market_phase.py` | `locals().get("usdkrw")` → 명시적 변수 초기화. `try` 블록 예외 시 환율이 무시되던 버그 수정 |
+| `signals.py` | FA 패널티 적용 후 `매수신호` 재판단 추가. 적자기업도 매수신호=True가 유지되던 버그 수정 |
+| `telegram_bot.py` | 독스트링 내 `\)` → Python 3.12+ SyntaxWarning 수정 |
+| `fundamental.py` | DART `corp_code` 오류 수정. 종목코드(6자리)를 고유번호(8자리)로 변환하지 않던 버그 수정 |
+
+#### 🟡 성능 개선
+
+| 항목 | 이전 | 개선 |
+|------|------|------|
+| VIX 다운로드 | 103개 종목마다 개별 호출 | `run_analysis()` 시작 시 1회 조회 → `settings["CURRENT_VIX"]` 공유 |
+| 주간봉 다운로드 | 103개 종목마다 개별 호출 | `bulk_download_weekly()` 1회 일괄 → 캐시 재활용 |
+| DART API | 재시도 없음 | `_dart_get()` 래퍼 추가 — 503/429 시 1회 재시도 + 딜레이 |
+| FCF 시가총액 | `yf.Ticker().info` 별도 호출 | `_get_yf_info()` 캐시 재활용 |
+
+#### 🟢 실전 기능 추가
+
+**트레일링 스탑 실전 알림** (`portfolio.py`)
+- 기존: 백테스트에만 존재, 실전 알림 없음
+- 변경: `portfolio_signals.txt` 보유중 종목의 진입 후 최고가(High) 기준으로 고점 대비 `TRAILING_STOP%` 하락 시 즉시 텔레그램 알림
+```
+🔻 트레일링 스탑 SK하이닉스(000660.KS)
+  고점: ₩240,000 → 현재: ₩218,500 | 수익률: +4.3%
+  고점 대비 -8.9% 하락 (기준 -8%) — 즉시 청산 검토
+```
+
+**파일 경로 안전화** (`scheduler_job.py`, `portfolio.py`)
+- `portfolio_signals.txt` 경로를 하드코딩에서 `os.path.abspath(__file__)` 기반으로 변경
+- GitHub Actions 실행 디렉토리 변경에도 파일을 정확히 찾음
+
+**`market_phase.py` 버그 4개 추가 수정**
+- `^KS200` → `^KS11` 통일 (yfinance 안정성)
+- `^VKOSPI` → `^VIX` 대체 (VKOSPI 데이터 불안정)
+- `iloc[-6]` NaN 방어 코드 추가
+- 중복 다운로드 제거 (실행당 API 호출 5~6회 → 3회)
+
+### v4.1 — 기본적 분석 통합
+
+**`fundamental.py` 신규 추가** — 기술적 분석 보조를 위한 5가지 기본적 분석
+
+| 지표 | 데이터 소스 | 활용 |
+|------|---------|------|
+| PER + PBR | yfinance (미국), yfinance (한국) | 저평가 보너스 +1점 / 고평가 패널티 -1점 |
+| 애널리스트 목표주가 | yfinance (미국 전용) | 괴리율 >20% → 우선순위 +5점 |
+| 실적 발표일 | yfinance (미국), DART (한국) | D-5 이내 → 우선순위 -5점 + 경고 표시 |
+| ROE + 매출성장률 | yfinance (미국), DART (한국) | ROE>15%+성장>10% → +1점 / 적자 → -1점 |
+| FCF 수익률 | yfinance (미국), DART (한국) | FCF>5% → +1점 / FCF음수 → -1점 |
+
+**뉴스 소스 3중 → 5중 폴백**
+- 추가: GNews (Google News 기반, 한국주식 포함, 100회/일 무료)
+- 추가: NewsAPI (GNews 폴백, 100회/일 무료)
+- 한국주식 뉴스 수신 문제 실질적 해결
+
+**USD/KRW 환율 국면 판단 반영**
+- yfinance(`KRW=X`) → exchangerate-api.com 2중 폴백
+- 환율 1,400원+ 상승 추세 → `bear_score +1`
+- 환율 1,280원- 하락 추세 → `bear_score -1`
 
 ---
 
@@ -548,7 +622,8 @@ SK하이닉스 (000660.KS) | ADX 32🔥
 | 언어 | Python 3.11+ |
 | 주가 데이터 | yfinance (무료), 업비트 REST API (무료) |
 | AI 분석 | Gemini 2.5 Flash (무료), Groq llama-3.3-70b (무료 폴백) |
-| 뉴스 | Alpha Vantage (무료 25회/일), Gemini Grounding |
+| 뉴스 | Alpha Vantage · GNews · NewsAPI · Gemini Grounding (5중 폴백) |
+| 기본적 분석 | DART OpenAPI (한국), yfinance .info (미국) |
 | 자동화 | GitHub Actions (무료) |
 | 알림 | Telegram Bot API (무료) |
 | **총 비용** | **$0/월** (모든 무료 티어 활용) |

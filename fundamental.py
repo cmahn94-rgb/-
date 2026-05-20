@@ -42,6 +42,28 @@ _info_cache: dict[str, dict] = {}
 _dart_cache: dict[str, dict] = {}
 
 
+def _dart_get(url: str, params: dict, timeout: int = 10) -> dict | None:
+    """
+    DART API GET 요청 래퍼 — 503/429 시 1회 재시도.
+    병렬 ThreadPoolExecutor에서 52개 종목이 동시 호출할 때
+    순간 과호출로 503이 날 수 있어 0.05초 딜레이 + 1회 재시도.
+    """
+    for attempt in range(2):
+        try:
+            time.sleep(0.05 * (attempt + 1))  # 1차: 0.05초, 재시도: 0.1초
+            resp = requests.get(url, params=params, timeout=timeout)
+            if resp.status_code == 200:
+                return resp.json()
+            if resp.status_code in (429, 503) and attempt == 0:
+                time.sleep(1.0)  # 과호출 시 1초 대기 후 재시도
+                continue
+            return None
+        except Exception:
+            if attempt == 0:
+                time.sleep(0.5)
+    return None
+
+
 def _get_yf_info(ticker: str) -> dict:
     """yfinance .info를 캐시와 함께 가져온다. 실패 시 빈 dict 반환."""
     if ticker in _info_cache:
@@ -300,13 +322,11 @@ def _get_dart_corp_code(ticker: str) -> str | None:
         return _dart_cache[cache_key]
 
     try:
-        resp = requests.get(
+        data = _dart_get(
             "https://opendart.fss.or.kr/api/company.json",
             params={"crtfc_key": dart_key, "stock_code": code},
-            timeout=8,
         )
-        if resp.status_code == 200:
-            data = resp.json()
+        if data:
             corp_code = data.get("corp_code")
             _dart_cache[cache_key] = corp_code
             return corp_code
@@ -331,21 +351,20 @@ def _get_dart_earnings_date(ticker: str) -> str | None:
         bgn = (now - timedelta(days=30)).strftime("%Y%m%d")
         end = (now + timedelta(days=60)).strftime("%Y%m%d")
 
-        resp = requests.get(
+        data = _dart_get(
             "https://opendart.fss.or.kr/api/list.json",
             params={
                 "crtfc_key": dart_key,
-                "corp_code":  corp_code,  # 8자리 고유코드
+                "corp_code":  corp_code,
                 "bgn_de":     bgn,
                 "end_de":     end,
                 "pblntf_ty":  "A",
                 "page_count": 10,
             },
-            timeout=8,
         )
-        if resp.status_code != 200:
+        if not data:
             return None
-        items = resp.json().get("list", [])
+        items = data.get("list", [])
         # 실적 관련 공시 키워드 필터
         keywords = ["사업보고서", "분기보고서", "반기보고서"]
         for item in items:
@@ -673,11 +692,10 @@ def _get_dart_fcf(ticker: str) -> tuple[float | None, float | None]:
             # 자본적지출은 음수로 표시됨
             fcf = 영업CF + 자본적지출  # 음수 + 음수 = 빼는 효과
 
-        # 시가총액: DART에 없으므로 yfinance에서 가져옴
+        # 시가총액: DART에 없으므로 yfinance에서 가져옴 (캐시 활용)
         시가총액 = None
         try:
-            import yfinance as yf
-            info = yf.Ticker(ticker).info or {}
+            info = _get_yf_info(ticker)  # 캐시 재활용 → 추가 API 호출 없음
             시가총액 = _safe(info.get("marketCap"))
         except Exception:
             pass

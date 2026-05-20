@@ -283,17 +283,14 @@ def calc_signals(ticker, name, market, settings):
         # ── 6개 기본 점수 조건 ────────────────────────────────
         조건1_rsi      = bool(rsi < rsi_buy)
         조건2_ma       = bool((현재가 > 현재_ma20) and (ma20_기울기 > 0))
-        # 거래량 임계값: VIX(공포지수)에 따라 동적으로 조정
-        # VIX 높을수록(공포장) 거래량 기준을 올려 허위 신호 감소
-        try:
-            vix_df_now = get_price_data("^VIX", period="5d")
-            현재_vix   = float(vix_df_now["Close"].squeeze().iloc[-1]) if vix_df_now is not None else 15.0
-        except Exception:
-            현재_vix = 15.0
+        # 거래량 임계값: VIX에 따라 동적 조정
+        # VIX는 run_analysis()에서 1회 조회 후 settings["CURRENT_VIX"]에 주입
+        # → 103개 종목마다 개별 다운로드하지 않아 API 호출 횟수 대폭 감소
+        현재_vix = float(settings.get("CURRENT_VIX", 15.0))
 
-        if 현재_vix >= 30:    vol_기준 = 2.0   # 공포장: 기준 대폭 상향
-        elif 현재_vix >= 20:  vol_기준 = 1.6   # 주의장: 기준 소폭 상향
-        else:                  vol_기준 = float(settings.get("VOL_MULT", 1.3))  # 평상시
+        if 현재_vix >= 30:    vol_기준 = 2.0
+        elif 현재_vix >= 20:  vol_기준 = 1.6
+        else:                  vol_기준 = float(settings.get("VOL_MULT", 1.3))
 
         조건3_거래량   = bool(오늘_거래량 > 평균_거래량 * vol_기준)
         조건4_볼린저   = bool(현재가 <= 현재_bb_중심선)
@@ -395,6 +392,10 @@ def calc_signals(ticker, name, market, settings):
 
         # FA 점수를 총점에 반영
         총_점수 = 총_점수 + fa["fa_보너스"] + fa["fa_패널티"]
+
+        # FA 패널티로 총점이 임계값 아래로 떨어지면 매수신호 재판단
+        # (기존엔 FA 전 매수신호=True가 FA 후에도 유지되는 버그)
+        매수신호 = 총_점수 >= 임계값
 
         # 실적 발표 임박이면 매수신호 강제 경고 (차단은 안 하되 알림에 표시)
         실적_임박 = fa["earnings"]["임박_경고"]

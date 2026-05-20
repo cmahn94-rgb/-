@@ -103,26 +103,38 @@ def check_portfolio_alerts(포트폴리오, settings):
 
 def check_max_holding_days(settings, 통화_기호_맵=None):
     """
-    portfolio_signals.txt에서 '보유중' 종목의 보유일수를 확인한다.
-    MAX_HOLDING_DAYS(기본 30일) 초과 시 강제 청산 알림을 반환한다.
+    portfolio_signals.txt '보유중' 종목에 대해 두 가지를 동시에 체크한다.
 
-    [중학생 설명]
-    트레일링 스탑도 안 걸리고 목표가도 안 오는 종목이 있으면
-    돈이 계속 묶여서 다른 기회를 놓친다.
-    30일이 지나도 청산이 안 됐으면 "이제 팔 때가 됐습니다" 알림을 보낸다.
+    [체크 1] 트레일링 스탑 실전 알림
+    백테스트에만 있던 트레일링 스탑을 실전에서도 알려준다.
+    진입 후 최고가(High 기준)를 조회해서 현재가가 고점 대비
+    TRAILING_STOP% 이상 빠지면 즉시 알림.
+
+    예) 진입가 10만원 → 고점 13만원 → 현재 11만 8천원
+        (13만 - 11만8천) / 13만 = 9.2% 하락 → 8% 기준 초과 → 알림!
+
+    [체크 2] 최대 보유일 초과 알림
+    MAX_HOLDING_DAYS(기본 30일) 넘으면 청산 검토 권고.
     """
     from datetime import date as _date
     import os
 
-    MAX_DAYS = int(settings.get("MAX_HOLDING_DAYS", 30))
+    MAX_DAYS      = int(settings.get("MAX_HOLDING_DAYS", 30))
+    TRAILING_STOP = float(settings.get("TRAILING_STOP", 8))
     알림_목록 = []
 
-    if not os.path.exists("portfolio_signals.txt"):
+    # 파일 경로: GitHub Actions는 레포 루트에서 실행
+    sig_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "portfolio_signals.txt")
+    if not os.path.exists(sig_path):
+        sig_path = "portfolio_signals.txt"  # 폴백
+    if not os.path.exists(sig_path):
         return 알림_목록
 
     try:
+        from data_loader import get_price_data
         오늘 = _date.today()
-        with open("portfolio_signals.txt", "r", encoding="utf-8") as f:
+        with open(sig_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
 
         for line in lines:
@@ -144,27 +156,55 @@ def check_max_holding_days(settings, 통화_기호_맵=None):
             except Exception:
                 continue
 
-            if 보유일 >= MAX_DAYS:
-                # 현재가 조회
-                from data_loader import get_price_data
-                df = get_price_data(ticker, period="5d")
-                현재가_str = "조회실패"
-                수익률_str = ""
+            기호 = "₩" if 통화 == "KRW" else "$"
+
+            # 현재가 + 고가 조회 (진입일 이후 전체 기간)
+            현재가 = None
+            고점   = None
+            try:
+                # 진입 이후 기간 계산
+                since_days = max(보유일 + 5, 10)
+                period = f"{min(since_days, 365)}d"
+                df = get_price_data(ticker, period=period)
                 if df is not None and len(df) >= 1:
                     현재가 = float(df["Close"].squeeze().iloc[-1])
-                    수익률 = (현재가 - 진입가) / 진입가 * 100
-                    기호   = "₩" if 통화 == "KRW" else "$"
-                    현재가_str = f"{기호}{현재가:,.0f}"
-                    수익률_str = f" | 수익률: {수익률:+.1f}%"
+                    # 진입일 이후의 최고가 (High 컬럼)
+                    if "High" in df.columns:
+                        고점 = float(df["High"].squeeze().max())
+                    else:
+                        고점 = float(df["Close"].squeeze().max())
+            except Exception:
+                pass
 
+            현재가_str = f"{기호}{현재가:,.0f}" if 현재가 else "조회실패"
+            수익률_str = ""
+            if 현재가 and 진입가 > 0:
+                수익률 = (현재가 - 진입가) / 진입가 * 100
+                수익률_str = f" | 수익률: {수익률:+.1f}%"
+
+            # ── 체크 1: 트레일링 스탑 ─────────────────────────
+            if 현재가 and 고점 and 고점 > 0:
+                낙폭률 = (고점 - 현재가) / 고점 * 100
+                if 낙폭률 >= TRAILING_STOP:
+                    알림_목록.append(
+                        f"🔻 *트레일링 스탑* {name}({ticker})\n"
+                        f"  고점: {기호}{고점:,.0f} → 현재: {현재가_str}"
+                        f"{수익률_str}\n"
+                        f"  고점 대비 -{낙폭률:.1f}% 하락 "
+                        f"(기준 -{TRAILING_STOP:.0f}%) — 즉시 청산 검토"
+                    )
+
+            # ── 체크 2: 최대 보유일 ───────────────────────────
+            if 보유일 >= MAX_DAYS:
                 알림_목록.append(
-                    f"⏰ *{name}({ticker}) 보유 {보유일}일 경과*\n"
-                    f"  진입가: {진입가:,.0f} → 현재: {현재가_str}{수익률_str}\n"
-                    f"  ※ 최대 보유일({MAX_DAYS}일) 초과 — 청산 검토 권장"
+                    f"⏰ *최대 보유일 초과* {name}({ticker}) {보유일}일\n"
+                    f"  진입가: {기호}{진입가:,.0f} → 현재: {현재가_str}"
+                    f"{수익률_str}\n"
+                    f"  {MAX_DAYS}일 초과 — 청산 또는 보유 연장 결정 필요"
                 )
 
     except Exception as e:
-        print(f"⚠️ 보유일 확인 오류: {e}")
+        print(f"⚠️ 보유일/트레일링 확인 오류: {e}")
 
     return 알림_목록
 
@@ -192,14 +232,18 @@ def generate_weekly_report(settings):
     if 오늘.weekday() != 6:
         return 알림_목록
 
-    if not os.path.exists("portfolio_signals.txt"):
+    sig_path2 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "portfolio_signals.txt")
+    if not os.path.exists(sig_path2):
+        sig_path2 = "portfolio_signals.txt"
+    if not os.path.exists(sig_path2):
         return 알림_목록
 
     일주일전 = 오늘 - timedelta(days=7)
     결과들 = []
 
     try:
-        with open("portfolio_signals.txt", "r", encoding="utf-8") as f:
+        with open(sig_path2, "r", encoding="utf-8") as f:
             lines = f.readlines()
 
         for line in lines:

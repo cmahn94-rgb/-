@@ -17,7 +17,7 @@ market_phase.py — 시장 국면 5단계 감지 + 국면별 동적 임계값
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from zoneinfo import ZoneInfo
 from datetime import datetime
@@ -76,6 +76,8 @@ def detect_market_phase(market: str = "KR") -> PhaseResult:
 
     ma20 = ma60 = rsi = vix = 0.0
     bear_score = 0
+    usdkrw = 0.0          # try 블록 밖에서 초기화 (locals() 버그 방지)
+    usdkrw_trend = "횡보"  # try 실패 시 기본값 보장
     phase = Phase.SIDEWAYS  # 기본값 (오류 시 보수적)
     us_phase = None
 
@@ -150,17 +152,14 @@ def detect_market_phase(market: str = "KR") -> PhaseResult:
         phase = Phase.SIDEWAYS
 
     cfg = PHASE_CONFIG[phase]
-    # usdkrw는 try 블록 안에서만 설정되므로 기본값 처리
-    _usdkrw = locals().get("usdkrw", 0.0)
-    _usdkrw_trend = locals().get("usdkrw_trend", "횡보")
     return PhaseResult(
         phase=phase,
         score_threshold=cfg["score_threshold"],
         description=cfg["description"],
         ma20=ma20, ma60=ma60, rsi=rsi, vix=vix,
         bear_score=bear_score,
-        usdkrw=_usdkrw,
-        usdkrw_trend=_usdkrw_trend,
+        usdkrw=usdkrw,            # 명시적 변수 참조 (locals() 제거)
+        usdkrw_trend=usdkrw_trend,
         us_phase=us_phase,
     )
 
