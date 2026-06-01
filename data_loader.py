@@ -43,6 +43,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── 문제2 수정: curl_cffi 세션으로 yfinance 401 Invalid Crumb 완화 ──
+# Yahoo Finance가 일반 requests 세션에 crumb 인증을 요구하면서
+# 401 Invalid Crumb 오류가 빈발 → curl_cffi가 브라우저를 모방해 우회
+# curl_cffi 미설치 시 None으로 두고 기본 동작 (graceful degradation)
+try:
+    from curl_cffi import requests as _cffi_requests
+    _yf_session = _cffi_requests.Session(impersonate="chrome")
+except Exception:
+    _yf_session = None
+
 _cache: dict = {}
 
 # ── 이벤트 키워드: 주가 등락에 직접 영향을 주는 단어들 ──────────
@@ -268,7 +278,7 @@ def _get_news_yfinance(ticker: str) -> list[dict]:
     if _is_upbit_ticker(ticker):
         return []
     try:
-        stock = yf.Ticker(ticker)
+        stock = yf.Ticker(ticker, session=_yf_session) if _yf_session else yf.Ticker(ticker)
         news = stock.news
         if not news:
             return []

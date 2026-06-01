@@ -47,20 +47,41 @@ def load_portfolio():
         print("⚠️ portfolio.txt 파일이 없습니다.")
         return 포트폴리오
 
-    with open("portfolio.txt", "r", encoding="utf-8") as f:
+    # stocks.txt에서 티커 → 종목명 매핑 테이블 구성
+    # portfolio.txt에는 종목명이 없으므로 자동으로 매핑
+    이름_맵: dict = {}
+    stocks_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stocks.txt")
+    if not os.path.exists(stocks_path):
+        stocks_path = "stocks.txt"
+    if os.path.exists(stocks_path):
+        with open(stocks_path, "r", encoding="utf-8") as sf:
+            for line in sf:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split(",")
+                if len(parts) >= 2:
+                    이름_맵[parts[0].strip()] = parts[1].strip()
+
+    portfolio_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio.txt")
+    if not os.path.exists(portfolio_path):
+        portfolio_path = "portfolio.txt"
+
+    with open(portfolio_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            # 빈 줄이나 주석(#으로 시작)은 건너뜀
             if not line or line.startswith("#"):
                 continue
             parts = line.split(",")
-            if len(parts) == 4:  # 티커,수량,평단가,통화 — 4개 항목이어야 유효
+            if len(parts) == 4:  # 티커,수량,평단가,통화
                 try:
+                    ticker = parts[0].strip()
                     포트폴리오.append({
-                        "ticker":    parts[0].strip(),
-                        "quantity":  float(parts[1].strip()),   # 소수점 수량 허용
-                        "avg_price": float(parts[2].strip()),   # 평단가
-                        "currency":  parts[3].strip()           # KRW / USD
+                        "ticker":    ticker,
+                        "name":      이름_맵.get(ticker, ticker),  # 종목명 자동 매핑
+                        "quantity":  float(parts[1].strip()),
+                        "avg_price": float(parts[2].strip()),
+                        "currency":  parts[3].strip()
                     })
                 except ValueError:
                     print(f"⚠️ portfolio.txt 파싱 오류 (줄 무시): {line}")

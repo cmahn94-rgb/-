@@ -29,6 +29,7 @@ def check_portfolio_alerts(포트폴리오, settings):
 
     for 종목 in 포트폴리오:
         ticker   = 종목["ticker"]
+        name     = 종목.get("name", ticker)  # 종목명 (없으면 티커로 대체)
         보유수량 = 종목["quantity"]
         평단가   = 종목["avg_price"]
         통화     = 종목["currency"]
@@ -49,7 +50,7 @@ def check_portfolio_alerts(포트폴리오, settings):
         # ── 익절 알림 ───────────────────────────────────
         if 현재가 >= 목표가:
             알림_목록.append(
-                f"🎯 *{ticker} 익절 목표 달성!*\n"
+                f"🎯 *{name}({ticker}) 익절 목표 달성!*\n"
                 f"  현재가: {통화_기호}{현재가:,.0f} | 수익률: +{수익률:.1f}%\n"
                 f"  평가액: {통화_기호}{평가액:,.0f} ({보유수량}주/개)\n"
                 f"  목표가: {통화_기호}{목표가:,.0f} (+{TARGET:.0f}%) | "
@@ -59,7 +60,7 @@ def check_portfolio_alerts(포트폴리오, settings):
         # ── 고정 손절 알림 ──────────────────────────────
         elif 현재가 <= 손절가:
             알림_목록.append(
-                f"🚨 *{ticker} 손절 기준 도달!*\n"
+                f"🚨 *{name}({ticker}) 손절 기준 도달!*\n"
                 f"  현재가: {통화_기호}{현재가:,.0f} | 수익률: {수익률:.1f}%\n"
                 f"  평가액: {통화_기호}{평가액:,.0f} ({보유수량}주/개)\n"
                 f"  목표가: {통화_기호}{목표가:,.0f} (+{TARGET:.0f}%) | "
@@ -80,7 +81,7 @@ def check_portfolio_alerts(포트폴리오, settings):
                 추적_손절_기준 = atr * 2.0
                 if 고점_대비_낙폭 > 추적_손절_기준:
                     알림_목록.append(
-                        f"📉 *{ticker} 추적 손절 알림!*\n"
+                        f"📉 *{name}({ticker}) 추적 손절 알림!*\n"
                         f"  현재가: {통화_기호}{현재가:,.0f} | 수익률: {수익률:+.1f}%\n"
                         f"  최근 고점: {통화_기호}{최근_고점:,.0f}\n"
                         f"  고점 대비 낙폭: {통화_기호}{고점_대비_낙폭:,.0f} "
@@ -92,7 +93,7 @@ def check_portfolio_alerts(포트폴리오, settings):
             elif atr and 일중_변동폭 > atr * 2.0:
                 # 하루 변동폭이 ATR×2보다 크면 비정상 흔들림으로 경고
                 알림_목록.append(
-                    f"⚡ *{ticker} 비정상 급등락 감지!*\n"
+                    f"⚡ *{name}({ticker}) 비정상 급등락 감지!*\n"
                     f"  현재가: {통화_기호}{현재가:,.0f} | 수익률: {수익률:+.1f}%\n"
                     f"  당일 변동폭: {통화_기호}{일중_변동폭:,.0f} "
                     f"(ATR의 {일중_변동폭/atr:.1f}배)"

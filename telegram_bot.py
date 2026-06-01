@@ -80,8 +80,36 @@ def send_telegram(message):
     # Markdown 특수문자 이스케이프 (_, [ ] 등이 400 오류 유발 방지)
     safe_message = _escape_markdown(message)
 
-    # 텔레그램은 글자 제한이 있어 4000자씩 잘라서 보냄
-    chunks = [safe_message[i:i + 4000] for i in range(0, len(safe_message), 4000)]
+    # 텔레그램은 글자 제한이 있어 분할 전송
+    # 수정: 4000자 단순 슬라이스 → 줄바꿈 기준으로 분할 (문장 중간 잘림 방지)
+    def _split_by_lines(text: str, limit: int = 4000) -> list[str]:
+        """줄바꿈 경계에서 분할 — AI 코멘트 등이 문장 중간에 끊기지 않도록"""
+        if len(text) <= limit:
+            return [text]
+        parts = []
+        lines = text.split("\n")
+        current = ""
+        for line in lines:
+            # 한 줄 자체가 limit을 초과하면 강제 슬라이스 (극단적 케이스)
+            if len(line) > limit:
+                if current:
+                    parts.append(current)
+                    current = ""
+                for i in range(0, len(line), limit):
+                    parts.append(line[i:i + limit])
+                continue
+            candidate = current + ("\n" if current else "") + line
+            if len(candidate) > limit:
+                if current:
+                    parts.append(current)
+                current = line
+            else:
+                current = candidate
+        if current:
+            parts.append(current)
+        return parts
+
+    chunks = _split_by_lines(safe_message, limit=4000)
     
     success_count = 0
     for idx, chunk in enumerate(chunks, 1):

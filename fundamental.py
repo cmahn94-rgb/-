@@ -70,7 +70,13 @@ def _get_yf_info(ticker: str) -> dict:
         return _info_cache[ticker]
     try:
         import yfinance as yf
-        info = yf.Ticker(ticker).info or {}
+        # 문제2 수정: curl_cffi 세션으로 401 Invalid Crumb 완화
+        try:
+            from curl_cffi import requests as _cffi_req
+            _sess = _cffi_req.Session(impersonate="chrome")
+            info = yf.Ticker(ticker, session=_sess).info or {}
+        except Exception:
+            info = yf.Ticker(ticker).info or {}
         # None인 값 제거
         info = {k: v for k, v in info.items() if v is not None}
         _info_cache[ticker] = info
@@ -732,6 +738,23 @@ def get_fundamentals(ticker: str, name: str, market: str,
         "fa_표시":    str,    알림에 표시할 한 줄 요약
     }
     """
+    # 🔴 문제1 수정: 암호화폐는 기본적 분석 대상 아님 → 즉시 빈 결과 반환
+    # (UPBIT:BTC를 yfinance에 조회해서 404 발생하던 문제 해결)
+    if market in ("CRYPTO", "CRYPTO_KRW"):
+        return {
+            "valuation": {"per": None, "pbr": None, "per_보너스": False,
+                          "pbr_보너스": False, "per_패널티": False, "표시문구": ""},
+            "analyst":   {"목표주가": None, "괴리율": None, "추천": "",
+                          "의견수": 0, "점수보너스": 0, "표시문구": ""},
+            "earnings":  {"발표일": None, "D_day": None, "임박_경고": False,
+                          "점수패널티": 0, "표시문구": ""},
+            "quality":   {"roe": None, "매출성장률": None, "품질_보너스": False,
+                          "적자_패널티": False, "표시문구": ""},
+            "fcf":       {"fcf_수익률": None, "fcf_보너스": False,
+                          "fcf_패널티": False, "표시문구": ""},
+            "fa_보너스": 0, "fa_패널티": 0, "fa_표시": "",
+        }
+
     # 한국주식은 DART 호출 2~3회 발생 가능 → 0.1초 딜레이
     if market == "KR" and os.getenv("DART_API_KEY"):
         time.sleep(0.1)
