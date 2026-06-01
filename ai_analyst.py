@@ -256,6 +256,43 @@ def get_market_news_briefing(market_time: str = "KST") -> str:
         }
 
         resp = requests.post(url, headers=headers, json=payload, timeout=20)
+        if resp.status_code == 429:
+            # Gemini Google Search 429 → Groq로 뉴스 브리핑 폴백
+            groq_prompt = (
+                f"오늘 {시장_컨텍스트}에서 가장 중요한 주식시장 이슈 3가지를 알려줘. "
+                "각 이슈마다 1)이슈 제목(10자 이내) 2)호재/악재/중립 3)관련 종목 4)한 줄 요약(30자 이내)을 포함해서 "
+                '아래 JSON 형식으로만 답해줘. 다른 설명 없이 JSON만 출력해. '
+                '[{"title":"이슈제목","sentiment":"호재","stocks":"종목명","summary":"요약"},'
+                '{"title":"...","sentiment":"...","stocks":"...","summary":"..."},'
+                '{"title":"...","sentiment":"...","stocks":"...","summary":"..."}]'
+            )
+            groq_raw = _call_groq(groq_prompt, max_tokens=500)
+            if not groq_raw:
+                return ""
+            raw = groq_raw
+            raw_clean = raw.replace("```json", "").replace("```", "").strip()
+            start = raw_clean.find("[")
+            end   = raw_clean.rfind("]")
+            if start == -1 or end == -1:
+                return ""
+            try:
+                items = json.loads(raw_clean[start:end + 1])
+            except Exception:
+                return ""
+            감성_아이콘 = {"호재": "🟢", "악재": "🔴", "중립": "⚪"}
+            lines = ["📰 *시장 주요 이슈*"]
+            for i, item in enumerate(items[:3], 1):
+                title     = item.get("title",     "")[:15]
+                sentiment = item.get("sentiment", "중립")
+                stocks    = item.get("stocks",    "")[:30]
+                summary   = item.get("summary",   "")[:40]
+                아이콘    = 감성_아이콘.get(sentiment, "⚪")
+                lines.append(f"  {i}. {아이콘} *{title}* [{sentiment}]")
+                if stocks:
+                    lines.append(f"     관련: {stocks}")
+                if summary:
+                    lines.append(f"     {summary}")
+            return "\n".join(lines) + "\n"
         if resp.status_code != 200:
             return ""
 

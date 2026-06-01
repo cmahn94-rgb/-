@@ -49,7 +49,7 @@ load_dotenv()
 # curl_cffi 미설치 시 None으로 두고 기본 동작 (graceful degradation)
 try:
     from curl_cffi import requests as _cffi_requests
-    _yf_session = _cffi_requests.Session(impersonate="chrome")
+    _yf_session = _cffi_requests.Session(impersonate="chrome120")
 except Exception:
     _yf_session = None
 
@@ -219,9 +219,13 @@ def bulk_download(tickers, period="1y", chunk_size=50):
         ticker_str = " ".join(묶음)
         print(f"  📥 일괄 다운로드 ({i+1}~{min(i+chunk_size, len(yf_tickers))}/{len(yf_tickers)}종목, period={period})...")
         try:
-            df_all = yf.download(
-                ticker_str, period=period,
+            _dl_kwargs = dict(
                 progress=False, auto_adjust=True, group_by="ticker"
+            )
+            if _yf_session:
+                _dl_kwargs["session"] = _yf_session
+            df_all = yf.download(
+                ticker_str, period=period, **_dl_kwargs
             )
             if df_all is None or df_all.empty:
                 continue
@@ -255,7 +259,10 @@ def get_price_data(ticker, period="1y"):
     if cache_key in _cache:
         return _cache[cache_key]
     try:
-        df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
+        _dl_kwargs = dict(progress=False, auto_adjust=True)
+        if _yf_session:
+            _dl_kwargs["session"] = _yf_session
+        df = yf.download(ticker, period=period, **_dl_kwargs)
         if df is None or df.empty:
             print(f"⚠️ {ticker} 데이터가 비어 있습니다.")
             return None
@@ -509,9 +516,11 @@ def get_today_open(ticker: str) -> float | None:
     if _is_upbit_ticker(ticker):
         return None  # 업비트는 24시간 거래라 갭 개념 없음
     try:
+        _dl_kwargs = dict(progress=False, auto_adjust=True)
+        if _yf_session:
+            _dl_kwargs["session"] = _yf_session
         df = yf.download(
-            ticker, period="1d", interval="1m",
-            progress=False, auto_adjust=True
+            ticker, period="1d", interval="1m", **_dl_kwargs
         )
         if df is None or df.empty:
             return None
@@ -542,9 +551,13 @@ def bulk_download_weekly(tickers, period="2y", chunk_size=50):
         chunk_str = " ".join(chunk)
         try:
             import yfinance as yf
+            _wk_kwargs = dict(
+                progress=False, auto_adjust=True, group_by="ticker"
+            )
+            if _yf_session:
+                _wk_kwargs["session"] = _yf_session
             df_all = yf.download(
-                chunk_str, period=period, interval="1wk",
-                progress=False, auto_adjust=True, group_by="ticker",
+                chunk_str, period=period, interval="1wk", **_wk_kwargs
             )
             for ticker in chunk:
                 cache_key = f"{ticker}_{period}_weekly"
@@ -580,9 +593,11 @@ def get_weekly_data(ticker: str, period: str = "2y") -> pd.DataFrame | None:
     if cache_key in _cache:
         return _cache[cache_key]
     try:
+        _wk_single_kwargs = dict(progress=False, auto_adjust=True)
+        if _yf_session:
+            _wk_single_kwargs["session"] = _yf_session
         df = yf.download(
-            ticker, period=period, interval="1wk",
-            progress=False, auto_adjust=True
+            ticker, period=period, interval="1wk", **_wk_single_kwargs
         )
         if df is None or df.empty or len(df) < 26:
             return None

@@ -142,7 +142,7 @@ def get_valuation(ticker: str, market: str) -> dict:
     # 표시 문구 생성
     parts = []
     if per is not None:  parts.append(f"PER {per:.1f}")
-    if pbr is not None:  parts.append(f"PBR {pbr:.2f}")
+    if pbr is not None and pbr > 0:  parts.append(f"PBR {pbr:.2f}")
     표시 = " | ".join(parts) if parts else ""
 
     return {
