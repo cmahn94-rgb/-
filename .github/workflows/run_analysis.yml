@@ -74,6 +74,7 @@ jobs:
           GNEWS_API_KEY:        ${{ secrets.GNEWS_API_KEY }}
           NEWSAPI_KEY:          ${{ secrets.NEWSAPI_KEY }}
           DART_API_KEY:         ${{ secrets.DART_API_KEY }}
+          GROQ_API_KEY:         ${{ secrets.GROQ_API_KEY }}
         run: python main.py
 
       # ── 실행 시각 로그 ──────────────────────────────────────────
