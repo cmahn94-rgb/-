@@ -123,11 +123,11 @@ def get_valuation(ticker: str, market: str) -> dict:
     per_패널티 = False
 
     if per is not None:
-        # 업종 평균 PER 추정: 섹터별 대략적 기준
-        # (정확한 업종 평균은 유료 데이터 필요 → 보수적 20배 기준 사용)
-        sector_avg_per = float(info.get("sectorPE", 20))
+        # ⑪ 수정: yfinance에 sectorPE 필드 없음 → 항상 기본값 20 사용되던 문제
+        # 보수적 고정 기준 25배 사용 (업종 무관 일반 기업 평균)
+        # PER < 20 → 저평가 보너스, PER > 50 → 고평가 패널티
         if per > 0:
-            per_보너스 = per < sector_avg_per * 0.8
+            per_보너스 = per < 20.0   # 25 * 0.8 = 20
             per_패널티 = per > 50
 
     if pbr is not None and pbr > 0:

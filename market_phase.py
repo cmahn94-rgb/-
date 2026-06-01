@@ -25,6 +25,9 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
+# ④ 수정: get_price_data 사용 → bulk_download 캐시 활용
+from data_loader import get_price_data as _get_price
+
 
 class Phase(Enum):
     STRONG_BULL = "🚀 강한상승"
@@ -71,8 +74,8 @@ def detect_market_phase(market: str = "KR") -> PhaseResult:
 
     반환값: PhaseResult (국면 + 임계값 + 세부 지표)
     """
-    import yfinance as yf
     from indicators import calc_rsi as _calc_rsi
+    # ④ yf.download 제거 — _get_price (get_price_data) 사용
 
     ma20 = ma60 = rsi = vix = 0.0
     bear_score = 0
@@ -82,19 +85,18 @@ def detect_market_phase(market: str = "KR") -> PhaseResult:
     us_phase = None
 
     try:
-        # ── 1) 공통: VIX + S&P500 한 번에 다운로드 ──────────────
-        # ^VIX: 미국 변동성지수 (VKOSPI보다 훨씬 안정적)
-        # ^GSPC: S&P500 (글로벌 시장 기준점)
-        vix_df = yf.download("^VIX",  period="3mo", progress=False, auto_adjust=True)
-        sp_df  = yf.download("^GSPC", period="1y",  progress=False, auto_adjust=True)
+        # ── 1) 공통: VIX + S&P500 — bulk_download 캐시 활용 ─────
+        # ④ 수정: yf.download 직접 호출 → get_price_data (캐시 재사용)
+        # scheduler_job.py의 bulk_download로 이미 캐시에 적재됨
+        vix_df = _get_price("^VIX",  period="3mo")
+        sp_df  = _get_price("^GSPC", period="1y")
 
         if vix_df is not None and len(vix_df) > 0:
             vix_close = vix_df["Close"].squeeze()
             vix = float(vix_close.iloc[-1]) if not pd.isna(vix_close.iloc[-1]) else 0.0
 
         # ── 2) KR 기준 국면 ──────────────────────────────────────
-        # ^KS200 대신 ^KS11 사용 (더 안정적, bear_score와 일치)
-        ks_df = yf.download("^KS11", period="1y", progress=False, auto_adjust=True)
+        ks_df = _get_price("^KS11", period="1y")
 
         if ks_df is not None and len(ks_df) >= 60:
             close = ks_df["Close"].squeeze()
@@ -183,15 +185,14 @@ def _get_usdkrw() -> tuple[float, str]:
     수집 순서: yfinance(KRW=X) → exchangerate-api.com (무료, 키 불필요)
     반환값: (환율 숫자, "상승"/"하락"/"횡보")
     """
-    import yfinance as yf
     import requests
 
     rate = 0.0
     trend = "횡보"
 
-    # ── 소스 1: yfinance ──────────────────────────────────
+    # ── 소스 1: get_price_data (캐시 활용) ───────────────
     try:
-        df = yf.download("KRW=X", period="1mo", progress=False, auto_adjust=True)
+        df = _get_price("KRW=X", period="1mo")
         if df is not None and len(df) >= 5:
             close = df["Close"].squeeze()
             rate  = _safe_float(close.iloc[-1])
@@ -206,8 +207,13 @@ def _get_usdkrw() -> tuple[float, str]:
     except Exception:
         pass
 
-    # ── 소스 2: exchangerate-api.com (무료, 키 불필요) ─────
+    # ── 소스 2: exchangerate-api.com + 캐시 파일로 추세 계산 ──
+    # ⑬ 수정: 이전 환율을 .usdkrw_cache에 저장 → 다음 호출에서 추세 계산 가능
     try:
+        import os as _os_fx
+        _cache_path = _os_fx.path.join(
+            _os_fx.path.dirname(_os_fx.path.abspath(__file__)), ".usdkrw_cache"
+        )
         resp = requests.get(
             "https://api.exchangerate-api.com/v4/latest/USD",
             timeout=8
@@ -215,11 +221,24 @@ def _get_usdkrw() -> tuple[float, str]:
         if resp.status_code == 200:
             data = resp.json()
             rate = float(data.get("rates", {}).get("KRW", 0))
-            # 이전 환율은 별도 요청이 필요해 추세는 "횡보"로 기본 설정
-            # (단일 시점 데이터라 추세 판단 불가)
             if rate > 100:
-                print(f"  💱 USD/KRW (exchangerate-api): {rate:,.1f}원")
-                return rate, "횡보"
+                # 이전 환율 읽기
+                prev_rate = 0.0
+                try:
+                    prev_rate = float(open(_cache_path).read().strip())
+                except Exception:
+                    pass
+                # 추세 계산
+                if prev_rate > 0:
+                    chg = (rate - prev_rate) / prev_rate * 100
+                    trend = "상승" if chg > 0.3 else ("하락" if chg < -0.3 else "횡보")
+                # 현재 환율 캐시 저장
+                try:
+                    open(_cache_path, "w").write(str(rate))
+                except Exception:
+                    pass
+                print(f"  💱 USD/KRW (exchangerate-api): {rate:,.1f}원 ({trend})")
+                return rate, trend
     except Exception:
         pass
 
@@ -349,8 +368,7 @@ def _calc_bear_score_from_data(
 # 하위 호환성 유지 (기존 코드가 _calc_bear_score()를 직접 호출하는 경우 대비)
 def _calc_bear_score() -> int:
     """기존 호출 호환용. 새 코드에서는 _calc_bear_score_from_data() 사용."""
-    import yfinance as yf
-    sp_df  = yf.download("^GSPC", period="1y",  progress=False, auto_adjust=True)
-    ks_df  = yf.download("^KS11", period="1y",  progress=False, auto_adjust=True)
-    vix_df = yf.download("^VIX",  period="3mo", progress=False, auto_adjust=True)
+    sp_df  = _get_price("^GSPC", period="1y")
+    ks_df  = _get_price("^KS11", period="1y")
+    vix_df = _get_price("^VIX",  period="3mo")
     return _calc_bear_score_from_data(sp_df, ks_df, vix_df)

@@ -253,7 +253,7 @@ def calc_signals(ticker, name, market, settings):
         rsi        = rsi_series.iloc[-1]
 
         ma_window  = int(settings.get("MA_WINDOW", 20))
-        ma20       = close.rolling(ma_window).mean()
+        ma20       = close.rolling(ma_window).mean()  # ⑫ 이름은 ma20이지만 실제로는 MA_WINDOW일선
         현재_ma20  = ma20.iloc[-1]
         ma20_기울기 = 현재_ma20 - ma20.iloc[-2]
 
@@ -374,11 +374,11 @@ def calc_signals(ticker, name, market, settings):
         #    → RSI 과열(70+) 종목은 보너스가 있어도 강력매수 표시 안 함
         #    → 과열 구간 진입은 '강력'이 아닌 '추세 추종' 신호
         보너스_있음 = bool(보너스1_다이버전스 or 보너스2_복합강세 or 보너스3_신고가)
-        강력매수 = (기본_점수 >= 5) or (총_점수 >= 4 and 보너스_있음 and 조건1_rsi)
+        # ③ 수정: 강력매수는 FA 반영 후에 최종 판단 (아래에서 재계산)
+        # 여기서는 임시 초기화만
+        강력매수 = False
 
         # ── 기본적 분석 (FA) 5가지 ─────────────────────────────
-        # 별도 함수로 분리해 실행 시간 최소화
-        # 오류 시 빈 값 반환 → 신호 계산에 영향 없음
         try:
             fa = get_fundamentals(ticker, name, market, 현재가)
         except Exception as _e:
@@ -393,11 +393,12 @@ def calc_signals(ticker, name, market, settings):
         # FA 점수를 총점에 반영
         총_점수 = 총_점수 + fa["fa_보너스"] + fa["fa_패널티"]
 
-        # FA 패널티로 총점이 임계값 아래로 떨어지면 매수신호 재판단
-        # (기존엔 FA 전 매수신호=True가 FA 후에도 유지되는 버그)
+        # FA 반영 후 매수신호·강력매수 최종 판단
         매수신호 = 총_점수 >= 임계값
+        # ③ 수정: 강력매수도 FA 반영 후 총_점수 기준으로 재계산
+        강력매수 = (매수신호 and
+                    ((기본_점수 >= 5) or (총_점수 >= 4 and 보너스_있음 and 조건1_rsi)))
 
-        # 실적 발표 임박이면 매수신호 강제 경고 (차단은 안 하되 알림에 표시)
         실적_임박 = fa["earnings"]["임박_경고"]
 
         atr_변동폭 = calc_atr(df)
@@ -516,7 +517,7 @@ def run_backtest(ticker, market, settings, period_months=12):
 
         RSI_BUY    = settings.get("RSI_BUY",    50)
         RSI_SELL   = settings.get("RSI_SELL",   80)
-        STOP_LOSS  = settings.get("STOP_LOSS",  -7)   # 손절 % (음수)
+        STOP_LOSS  = settings.get("STOP_LOSS",  -5)   # ⑤ 수정: settings.txt 기본값 -5와 통일
         ADX_MIN       = float(settings.get("ADX_MIN", 30))  # 추세 강도 최소값
         TRAILING_STOP = float(settings.get("TRAILING_STOP", 8))  # 고점 대비 손절 % (기본 8%)
         threshold     = int(settings.get("BUY_SCORE_THRESHOLD", 3))
@@ -679,8 +680,11 @@ def run_backtest_walkforward(ticker, market, settings):
         if len(df_학습) < 60 or len(df_검증) < 40:
             return None
 
-        bt_학습 = run_backtest(ticker, market, settings)  # 전체 1년 결과
-        # 검증 구간만 따로 백테스트
+        # ① 수정: 학습 구간(앞 67%)으로만 백테스트해야 WF 비교가 의미있음
+        # 기존: run_backtest(전체 1년) → 검증 구간과 비교가 틀린 기준
+        # ⑦ 참고: _run_backtest_on_df가 내부적으로 ADX를 재계산함
+        # 캐시 구조상 get_price_data는 재호출 없이 캐시 반환
+        bt_학습 = _run_backtest_on_df(df_학습, market, settings)
         bt_검증 = _run_backtest_on_df(df_검증, market, settings)
 
         if bt_학습 is None or bt_검증 is None:
@@ -731,12 +735,30 @@ def _run_backtest_on_df(df, market, settings):
         macd_line, sig_line, hist = calc_macd(close)
         avg_vol = volume.rolling(20).mean() if volume is not None else None
 
-        # settings.txt 값 그대로 사용 (run_backtest와 동일한 기준 보장)
-        RSI_BUY       = float(settings.get("RSI_BUY",    50))  # 기본 50 (settings.txt와 동일)
+        # ② ADX series 사전 계산 (run_backtest와 동일, look-ahead bias 없음)
+        adx_s = None
+        try:
+            if high is not None and low is not None:
+                _hd = high.diff(); _ld = -low.diff()
+                _pdm = pd.Series(np.where((_hd>_ld)&(_hd>0),_hd,0.), index=high.index)
+                _mdm = pd.Series(np.where((_ld>_hd)&(_ld>0),_ld,0.), index=low.index)
+                _tr  = pd.concat([(high-low).abs(),(high-close.shift(1)).abs(),(low-close.shift(1)).abs()],axis=1).max(axis=1)
+                _a   = 1/14
+                _atr = _tr.ewm(alpha=_a,adjust=False).mean()
+                _pdi = 100*_pdm.ewm(alpha=_a,adjust=False).mean()/_atr.replace(0,np.nan)
+                _mdi = 100*_mdm.ewm(alpha=_a,adjust=False).mean()/_atr.replace(0,np.nan)
+                _dx  = 100*(_pdi-_mdi).abs()/(_pdi+_mdi).replace(0,np.nan)
+                adx_s = _dx.ewm(alpha=_a,adjust=False).mean()
+        except Exception:
+            adx_s = None
+
+        # settings.txt 값 그대로 사용
+        RSI_BUY       = float(settings.get("RSI_BUY",    50))
         RSI_SELL      = float(settings.get("RSI_SELL",   75))
         STOP_LOSS     = float(settings.get("STOP_LOSS",  -5))
         TRAILING_STOP = float(settings.get("TRAILING_STOP", 8))
-        threshold     = int(settings.get("BUY_SCORE_THRESHOLD", 4))  # 기본 4 (settings.txt와 동일)
+        ADX_MIN       = float(settings.get("ADX_MIN", 30))  # ② 추가
+        threshold     = int(settings.get("BUY_SCORE_THRESHOLD", 3))  # ② 수정: run_backtest와 동일하게 3
         commission    = settings.get("COMMISSION",  0.001)
         slippage      = settings.get("SLIPPAGE",    0.0005)
         거래세        = 0.002 if market == "KR" else 0.0
@@ -756,10 +778,23 @@ def _run_backtest_on_df(df, market, settings):
                 c5 = (hist.iloc[i] > 0 and hist.iloc[i-1] <= 0
                       and macd_line.iloc[i] > sig_line.iloc[i])
                 c6 = False
-                if open_ is not None and i >= 1:
+                if open_ is not None and high is not None and low is not None and i >= 1:
                     기준 = open_.iloc[i] + (high.iloc[i-1] - low.iloc[i-1]) * 0.5
-                    c6   = 현재가 > 기준
-                if sum([c1,c2,c3,c4,c5,c6]) >= threshold:
+                    돌파 = 현재가 > 기준
+                    # ② ADX 조건 포함 (run_backtest와 동일 전략)
+                    i_adx = float(adx_s.iloc[i]) if (adx_s is not None and not pd.isna(adx_s.iloc[i])) else None
+                    c6 = 돌파 and (i_adx is not None and i_adx >= ADX_MIN)
+
+                기본_점수 = sum([c1,c2,c3,c4,c5,c6])
+
+                # ② 보너스 포함 (run_backtest와 동일 전략)
+                b1 = bool(detect_rsi_divergence(close.iloc[:i+1], rsi_series.iloc[:i+1], 10) and c1)
+                b2 = bool(c5 and c3)
+                고점_52 = close.iloc[max(0,i-252):i+1].max()
+                b3 = bool(현재가 >= 고점_52 * 0.95)
+                총_점수 = 기본_점수 + sum([b1, b2, b3])
+
+                if 총_점수 >= threshold:
                     매수가 = 현재가 * (1 + 매수_비용)
                     매수_후_고점 = 현재가
             else:

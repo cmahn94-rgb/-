@@ -274,22 +274,29 @@ def generate_weekly_report(settings):
 
             현재가 = float(df["Close"].squeeze().iloc[-1])
             수익률 = (현재가 - 진입가) / 진입가 * 100
-            결과들.append((ticker, name, 수익률, 신호일))
+            # ⑩ 수정: 상태 구분 저장 (신호발생=시스템정확도, 보유중=실제손익)
+            결과들.append((ticker, name, 수익률, 신호일, 상태))
 
         if not 결과들:
             return 알림_목록
 
-        수익_건 = [r for r in 결과들 if r[2] > 0]
-        손실_건 = [r for r in 결과들 if r[2] <= 0]
-        avg = sum(r[2] for r in 결과들) / len(결과들)
-        최고 = max(결과들, key=lambda x: x[2])
-        최저 = min(결과들, key=lambda x: x[2])
-        승률 = len(수익_건) / len(결과들) * 100
+        # ⑩ 수정: 신호발생(시스템 정확도)과 보유중(실제 손익) 분리 집계
+        전체_결과 = 결과들
+        실매수_결과 = [r for r in 결과들 if r[4] in ("보유중", "익절", "손절", "기간초과청산")]
+        집계_대상 = 실매수_결과 if 실매수_결과 else 전체_결과
+        집계_라벨 = "실매수 손익" if 실매수_결과 else "신호 정확도(미매수 포함)"
+
+        수익_건 = [r for r in 집계_대상 if r[2] > 0]
+        손실_건 = [r for r in 집계_대상 if r[2] <= 0]
+        avg = sum(r[2] for r in 집계_대상) / len(집계_대상)
+        최고 = max(집계_대상, key=lambda x: x[2])
+        최저 = min(집계_대상, key=lambda x: x[2])
+        승률 = len(수익_건) / len(집계_대상) * 100
 
         리포트 = (
-            f"📊 *주간 신호 성과 리포트*\n"
+            f"📊 *주간 신호 성과 리포트* ({집계_라벨})\n"
             f"기간: {일주일전} ~ {오늘}\n"
-            f"총 {len(결과들)}개 신호 | "
+            f"총 {len(집계_대상)}개 | "
             f"수익 {len(수익_건)}개({승률:.0f}%) | "
             f"손실 {len(손실_건)}개({100-승률:.0f}%)\n"
             f"평균 수익률: {avg:+.1f}%\n"
@@ -297,11 +304,10 @@ def generate_weekly_report(settings):
             f"최저: {최저[2]:+.1f}% ({최저[1]})\n"
         )
 
-        # 상세 내역
         리포트 += "\n상세:\n"
-        for ticker, name, ret, dt in sorted(결과들, key=lambda x: x[2], reverse=True):
+        for ticker, name, ret, dt, st in sorted(집계_대상, key=lambda x: x[2], reverse=True):
             아이콘 = "🟢" if ret > 0 else "🔴"
-            리포트 += f"  {아이콘} {name}({ticker}): {ret:+.1f}% (신호일 {dt})\n"
+            리포트 += f"  {아이콘} {name}({ticker}): {ret:+.1f}% ({st}, 신호일 {dt})\n"
 
         알림_목록.append(리포트)
 
