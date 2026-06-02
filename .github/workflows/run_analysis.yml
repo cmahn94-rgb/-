@@ -100,14 +100,9 @@ jobs:
       - name: Push HTML report to GitHub Pages
         if: success()
         run: |
-          # git 사용자 설정 (GitHub Actions 봇 계정)
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # docs/ 폴더 변경사항 스테이징
           git add docs/
-
-          # 변경사항 있을 때만 커밋 (없으면 에러 방지)
           if git diff --cached --quiet; then
             echo "📋 HTML 변경사항 없음 — 커밋 건너뜀"
           else
@@ -116,6 +111,45 @@ jobs:
             git push
             echo "✅ GitHub Pages 배포 완료"
           fi
+
+      # ── git push 완료 후 링크 텔레그램 전송 ─────────────────────
+      # python main.py 실행 중 docs/.pending_link.txt 에 링크 메시지가 저장됨.
+      # git push 완료 후 GitHub Pages 배포까지 약 60초 대기 후 링크 전송.
+      # 이렇게 해야 링크를 클릭했을 때 404가 나지 않음.
+      - name: Send Telegram link after deployment
+        if: success()
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GH_PAGES_URL:     ${{ secrets.GH_PAGES_URL }}
+        run: |
+          # GH_PAGES_URL이 없으면 이미 main.py에서 텍스트 전송했으므로 건너뜀
+          if [ -z "$GH_PAGES_URL" ]; then
+            echo "GH_PAGES_URL 미설정 — 링크 전송 건너뜀"
+            exit 0
+          fi
+
+          # 링크 파일 존재 확인
+          if [ ! -f "docs/.pending_link.txt" ]; then
+            echo "링크 파일 없음 — 건너뜀"
+            exit 0
+          fi
+
+          # GitHub Pages 배포 완료 대기 (60초)
+          echo "⏳ GitHub Pages 배포 대기 중 (60초)..."
+          sleep 60
+
+          # 링크 메시지 읽어서 전송
+          MESSAGE=$(cat docs/.pending_link.txt)
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${MESSAGE}" \
+            -d "parse_mode=Markdown")
+          echo "텔레그램 링크 전송: HTTP ${HTTP_STATUS}"
+
+          # 전송 완료 후 임시 파일 삭제
+          rm -f docs/.pending_link.txt
 
       # ── 실행 시각 로그 ──────────────────────────────────────────
       # 텔레그램 알림이 안 왔을 때,
