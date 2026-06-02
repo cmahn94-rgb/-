@@ -1,41 +1,48 @@
 """
-signals.py — 마켓 레짐 필터 · 점수제 매수/매도 신호 · 백테스트 · 포지션 사이징
-================================================================================
-[전략 업그레이드 v3 — 중학생도 이해할 수 있는 설명]
+signals.py — 매수/매도 신호 계산 · 백테스트 · Walk-Forward 검증 · 포지션 사이징
+=================================================================================
+[전략 개요 v5.1]
 
-■ 핵심 개념: 6가지 지표 중 3개 이상이 "살 때다!"를 외치면 매수 신호 발생
+■ 핵심 흐름: RSI 차단 → 기술지표 점수 → 팩터 축 다양성 → 백테스트 검증 → 신호 발생
 
-■ 새로 추가된 것들:
-  ① RSI 다이버전스 보너스 (+1점)
-     - "가격은 내려가는데, RSI는 올라가는" 상황 = 곧 반등 가능성이 높다는 신호
-     - 비유: 학생이 공부는 더 열심히 하는데 성적이 잠깐 떨어진 것 → 곧 오른다
+■ 전제 조건 (이것부터 통과해야 점수 계산 진행)
+   RSI < RSI_BUY (기본 40): 미충족 시 즉시 차단 (조기 반환)
+   → RSI 40 이상은 과매도가 아닌 단순 하락 중. 과열 구간 매수 신호 방지.
 
-  ② ADX 추세 강도 필터
-     - ADX(평균방향지수)가 25 이상이면 "지금 추세가 뚜렷하다"는 뜻
-     - 추세가 뚜렷할 때만 변동성 돌파 점수를 인정 → 허위 신호 감소
+■ 기본 점수 조건 (각 1점, 최대 6점)
+   ① RSI < RSI_BUY(40)     : 과매도 확인 (전제 통과 후 재확인)
+   ② 현재가 > MA20 + 기울기↑: 단기 추세 상승 중
+   ③ 거래량 > 평균 * 기준배수 : 평소보다 관심 급증 (국면별 기준 조정)
+   ④ 현재가 <= 볼린저 중심선 : 통계적 저평가 구간
+   ⑤ MACD 히스토그램 음→양  : 하락 에너지 → 상승 에너지 전환
+   ⑥ 변동성 돌파 + ADX≥ADX_MIN: 강한 추세와 함께 기준선 돌파
 
-  ③ 매도 신호 추가 (기존엔 매도 조건이 없었음!)
-     - RSI 과열 + 볼린저 상단 돌파 + MACD 하락 전환 → 매도 알림 발송
-     - 비유: "사과가 너무 비싸졌다" + "거래가 뜸해졌다" → 팔 때
+■ 4개 독립 팩터 축 (중복 제거)
+   추세축    : ②(MA20) OR ⑥(변동성돌파)   → 가격 방향
+   모멘텀축  : ⑤(MACD)                    → 추세 전환 속도
+   평균회귀축: ①(RSI) OR ④(볼린저)        → 저평가 수준
+   수급축    : ③(거래량)                   → 참여자 관심
+   → 3축 이상 동시 충족 시 보너스0 +1점 (독립 근거 다양성)
 
-  ④ 점수 가중치 조정
-     - 강력 신호(MACD 전환 + 거래량 급증 동시)에 추가 보너스 부여
-     - 단순히 3개 조건이 아니라 "어떤 조건이냐"도 중요하게 봄
+■ 보너스 점수 (각 +1점, 최대 +6점)
+   ⓪ 독립 축 3개 이상 충족 (+1)  → 팩터 다양성 보상
+   ⑦ RSI 다이버전스        (+1)  → 가격↓ + RSI↑ = 반등 예고
+   ⑧ MACD 전환 & 거래량 동시(+1) → 두 강한 신호 동시 발생
+   ⑨ 52주 신고가 근접      (+1)  → 저항선 없는 구간 (O'Neil CANSLIM)
+   ⑩ MACD + 스토캐스틱 동시(+1) → 이중 전환 = 허위신호 감소
+   ⑪ CCI < -100            (+1)  → 극단적 저평가 (RSI와 이중 확인)
 
-[점수표 — 6개 조건 각 1점]
-  ① RSI < RSI_BUY          : 1점  (가격이 많이 내려와서 저렴한 상태)
-  ② 현재가 > MA20 + 기울기↑ : 1점  (단기 평균선보다 위에 있고, 상승 중)
-  ③ 거래량 > 평균 * 1.3     : 1점  (사람들이 평소보다 많이 거래 중 = 관심 증가)
-  ④ 현재가 <= 볼린저 중심선  : 1점  (통계적으로 적당한 가격대)
-  ⑤ MACD 히스토그램 음→양  : 1점  (하락 에너지 → 상승 에너지 전환)
-  ⑥ 변동성 돌파 + ADX≥25   : 1점  (강한 방향성을 가진 상승 돌파)
+■ 패널티
+   주간봉 MACD 음수         (-1)  → 큰 흐름이 하락 추세
 
-[보너스 점수]
-  ⑦ RSI 다이버전스           : +1점 (가격↓ + RSI↑ = 반등 예고 신호)
-  ⑧ MACD 전환 & 거래량 동시  : +1점 (두 강력 신호가 동시에 등장)
+■ FA/수급 점수 반영 (총점에 합산)
+   기본적 분석(PER/PBR/ROE/FCF/목표주가): ±1~2점
+   기관/외국인 수급 (KR 전용): +1~3점 / -1점
 
-  매수 신호: 총점 >= BUY_SCORE_THRESHOLD (기본 3)
-  강력 매수: 총점 >= 5  → 리포트에 🔥 표시
+■ 백테스트 필터 (signals 차단)
+   1년 Sharpe < 0          → 손실 전략 차단
+   WF 신뢰도 "낮음"        → 검증 미통과 차단
+   (낮음 = 과적합 Sharpe 차이 > 0.5 OR 검증 Sharpe < 0)
 """
 
 import numpy as np
@@ -278,10 +285,37 @@ def calc_signals(ticker, name, market, settings):
         # ADX(추세 강도) 계산 — 변동성 돌파 신뢰도 향상에 사용
         adx_값 = calc_adx(df)
 
-        rsi_buy = settings.get("RSI_BUY", 50)
+        rsi_buy = settings.get("RSI_BUY", 40)
 
         # ── 6개 기본 점수 조건 ────────────────────────────────
         조건1_rsi      = bool(rsi < rsi_buy)
+
+        # [치명적 결함 수정 1]
+        # RSI 조건 미충족(rsi >= rsi_buy) 시 즉시 신호 차단
+        # 근거: RSI 40 이상은 단순 "하락 중"이지 과매도가 아님
+        #       RSI 76인 AAPL, RSI 81인 SK하이닉스가 매수 신호로 올라오는 근본 원인
+        #       나머지 5개 조건이 모두 충족돼도 RSI 과열 구간 진입은 매수가 아님
+        if not 조건1_rsi:
+            return {
+                "ticker": ticker, "name": name, "market": market,
+                "현재가": 현재가, "rsi": rsi,
+                "매수신호": False, "강력매수": False,
+                "점수": 0, "기본점수": 0, "임계값": 99,
+                "조건1_rsi": False, "조건2_ma": False, "조건3_거래량": False,
+                "조건4_볼린저": False, "조건5_macd": False, "조건6_변동성돌파": False,
+                "보너스_다이버전스": False, "보너스_복합강세": False,
+                "보너스_신고가": False, "보너스_stoch": False, "보너스_cci": False,
+                "보너스_축다양성": False, "축_개수": 0,
+                "주간봉_패널티": 0,
+                "fa": {"fa_보너스": 0, "fa_패널티": 0, "fa_표시": "",
+                       "valuation": {}, "analyst": {}, "earnings": {},
+                       "quality": {}, "fcf": {}},
+                "실적_임박": False,
+                "수급": {"보너스": 0, "표시문구": "", "데이터_없음": True,
+                         "외국인_연속": 0, "기관_연속": 0, "동시순매수": False},
+                "atr": calc_atr(df), "adx": None,
+                "ma20": 0, "bb_중심선": 0, "bb_하단": 0,
+            }
         조건2_ma       = bool((현재가 > 현재_ma20) and (ma20_기울기 > 0))
         # 거래량 임계값: VIX에 따라 동적 조정
         # VIX는 run_analysis()에서 1회 조회 후 settings["CURRENT_VIX"]에 주입
@@ -309,6 +343,23 @@ def calc_signals(ticker, name, market, settings):
 
         기본_점수 = sum([조건1_rsi, 조건2_ma, 조건3_거래량,
                         조건4_볼린저, 조건5_macd, 조건6_변동성돌파])
+
+        # ── [4순위] 팩터 중복 제거: 독립 축 다양성 점수 ──────────────
+        # 문제: RSI·MACD·MA·볼린저는 전부 '종가'에서 파생 → 같은 정보 중복 카운트
+        #       4개 신호가 떠도 실질은 "가격이 빠졌다" 하나를 4번 센 것
+        # 해결: 6개 조건을 4개 독립 축으로 묶고, 축마다 충족 여부를 따로 본다
+        #   - 추세축   : MA20 상승(조건2) OR 변동성돌파(조건6)  → 가격 방향
+        #   - 모멘텀축 : MACD 전환(조건5)                       → 추세 전환 속도
+        #   - 평균회귀축: RSI 과매도(조건1) OR 볼린저 하단(조건4) → 저평가
+        #   - 수급축   : 거래량 급증(조건3)                     → 참여자 관심
+        # 서로 다른 축이 동시에 충족될수록 '독립적 근거'가 많다는 뜻 → 신뢰도 높음
+        추세축   = bool(조건2_ma or 조건6_변동성돌파)
+        모멘텀축 = bool(조건5_macd)
+        평균회귀축 = bool(조건1_rsi or 조건4_볼린저)
+        수급축   = bool(조건3_거래량)
+        축_개수  = sum([추세축, 모멘텀축, 평균회귀축, 수급축])
+        # 3개 이상 독립 축 동시 충족 시 +1 (서로 다른 근거가 겹쳤다)
+        보너스0_축다양성 = bool(축_개수 >= 3)
 
         # ── 보너스 점수 (새로 추가) ───────────────────────────
         # ⑦ RSI 다이버전스 보너스: 반등 가능성이 높은 특수 상황
@@ -358,15 +409,14 @@ def calc_signals(ticker, name, market, settings):
         except Exception:
             주간봉_패널티 = 0
 
-        보너스_점수 = sum([보너스1_다이버전스, 보너스2_복합강세, 보너스3_신고가,
+        보너스_점수 = sum([보너스0_축다양성,
+                          보너스1_다이버전스, 보너스2_복합강세, 보너스3_신고가,
                           보너스4_stoch_macd, 보너스5_cci])
         총_점수    = 기본_점수 + 보너스_점수 - 주간봉_패널티
 
         임계값_기본 = int(settings.get("BUY_SCORE_THRESHOLD", 3))
-        # RSI 조건(c1)이 ❌이면 임계값을 1점 더 높게 요구
-        # → RSI 과열(70+) 구간에서 52주신고가+거래량+변동성돌파만으로
-        #   매수 신호가 뜨는 문제 방지 (실제론 고점 진입 위험)
-        임계값 = 임계값_기본 + (0 if 조건1_rsi else 1)
+        # RSI 조건은 이미 위에서 차단 처리됨 (조건1_rsi = True 보장)
+        임계값 = 임계값_기본
         매수신호 = 총_점수 >= 임계값
         # 강력매수 판단 기준
         # ① 기본 지표만으로 5점 이상 → 명확히 강력
@@ -390,13 +440,27 @@ def calc_signals(ticker, name, market, settings):
                   "quality":{"roe":None,"매출성장률":None,"품질_보너스":False,"적자_패널티":False,"표시문구":""},
                   "fcf":{"fcf_수익률":None,"fcf_보너스":False,"fcf_패널티":False,"표시문구":""}}
 
-        # FA 점수를 총점에 반영
-        총_점수 = 총_점수 + fa["fa_보너스"] + fa["fa_패널티"]
+        # ── 기관/외국인 수급 팩터 (한국 주식 전용) ──────────────
+        # 한국장은 기관·외국인 수급이 주가에 미치는 영향이 매우 크다.
+        # 매수 신호가 나도 기관+외국인이 동시 매도 중이면 신뢰도 하락.
+        # KRX API → 네이버금융 순으로 폴백.
+        수급 = {"보너스": 0, "표시문구": "", "데이터_없음": True,
+               "외국인_연속": 0, "기관_연속": 0, "동시순매수": False}
+        if market == "KR":
+            try:
+                from fundamental import get_kr_supply_demand
+                수급 = get_kr_supply_demand(ticker)
+            except Exception as _e:
+                print(f"⚠️ {name} 수급 조회 실패: {_e}")
+
+        # FA + 수급 점수를 총점에 반영
+        총_점수 = 총_점수 + fa["fa_보너스"] + fa["fa_패널티"] + 수급["보너스"]
 
         # FA 반영 후 매수신호·강력매수 최종 판단
         매수신호 = 총_점수 >= 임계값
-        # ③ 수정: 강력매수도 FA 반영 후 총_점수 기준으로 재계산
-        강력매수 = (매수신호 and
+        # [4순위] 강력매수 = 독립 축 3개 이상 충족이 추가 요건
+        #   기본점수 5점이어도 같은 축만 충족했다면 '강력'이 아님
+        강력매수 = (매수신호 and 축_개수 >= 3 and
                     ((기본_점수 >= 5) or (총_점수 >= 4 and 보너스_있음 and 조건1_rsi)))
 
         실적_임박 = fa["earnings"]["임박_경고"]
@@ -430,10 +494,14 @@ def calc_signals(ticker, name, market, settings):
             "보너스_신고가":    보너스3_신고가,
             "보너스_stoch":     보너스4_stoch_macd,
             "보너스_cci":       보너스5_cci,
+            "보너스_축다양성":  보너스0_축다양성,
+            "축_개수":          축_개수,
             "주간봉_패널티":   주간봉_패널티,
             # 기본적 분석
             "fa":               fa,
             "실적_임박":        실적_임박,
+            # 기관/외국인 수급 (KR만, US/크립토는 빈 dict)
+            "수급":             수급,
         }
 
     except Exception as e:
@@ -454,7 +522,7 @@ def run_backtest(ticker, market, settings, period_months=12):
     수수료, 슬리피지(실제 체결 가격 차이), 한국 거래세까지 모두 빼고
     실제로 손에 남는 금액을 기준으로 계산한다.
 
-    개선 사항: 매도 조건에 "손절선(-7%)" 추가 → 큰 손실 방지 효과 반영
+    매도 조건: 트레일링 스탑(고점 대비 TRAILING_STOP%) + RSI 과열(RSI_SELL) + 고정 손절(STOP_LOSS%)
     """
     기간_맵  = {3: "3mo", 6: "6mo", 12: "1y"}
     yf_기간  = 기간_맵.get(period_months, "1y")
@@ -515,8 +583,8 @@ def run_backtest(ticker, market, settings, period_months=12):
         except Exception:
             adx_series = None
 
-        RSI_BUY    = settings.get("RSI_BUY",    50)
-        RSI_SELL   = settings.get("RSI_SELL",   80)
+        RSI_BUY    = settings.get("RSI_BUY",    40)
+        RSI_SELL   = settings.get("RSI_SELL",   75)
         STOP_LOSS  = settings.get("STOP_LOSS",  -5)   # ⑤ 수정: settings.txt 기본값 -5와 통일
         ADX_MIN       = float(settings.get("ADX_MIN", 30))  # 추세 강도 최소값
         TRAILING_STOP = float(settings.get("TRAILING_STOP", 8))  # 고점 대비 손절 % (기본 8%)
@@ -694,9 +762,14 @@ def run_backtest_walkforward(ticker, market, settings):
         sharpe_차이 = bt_학습["sharpe"] - (bt_검증["sharpe"] if bt_검증 else 0)
         과적합_경고 = sharpe_차이 > 0.5
 
-        if not 과적합_경고 and bt_검증["sharpe"] >= 1.0:
+        # 신뢰도 판단 기준 (강화):
+        # 높음: 과적합 없고 + 검증 Sharpe >= 1.0
+        # 보통: 과적합 없고 + 검증 Sharpe >= 0.0 (손익분기 이상)
+        # 낮음: 과적합 있거나 + 검증 Sharpe < 0.0 (검증 구간 손실)
+        검증_sharpe = bt_검증["sharpe"] if bt_검증 else -999
+        if not 과적합_경고 and 검증_sharpe >= 1.0:
             신뢰도 = "높음"
-        elif not 과적합_경고:
+        elif not 과적합_경고 and 검증_sharpe >= 0.0:
             신뢰도 = "보통"
         else:
             신뢰도 = "낮음"
@@ -753,7 +826,7 @@ def _run_backtest_on_df(df, market, settings):
             adx_s = None
 
         # settings.txt 값 그대로 사용
-        RSI_BUY       = float(settings.get("RSI_BUY",    50))
+        RSI_BUY       = float(settings.get("RSI_BUY",    40))
         RSI_SELL      = float(settings.get("RSI_SELL",   75))
         STOP_LOSS     = float(settings.get("STOP_LOSS",  -5))
         TRAILING_STOP = float(settings.get("TRAILING_STOP", 8))

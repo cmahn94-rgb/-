@@ -43,15 +43,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── 문제2 수정: curl_cffi 세션으로 yfinance 401 Invalid Crumb 완화 ──
-# Yahoo Finance가 일반 requests 세션에 crumb 인증을 요구하면서
-# 401 Invalid Crumb 오류가 빈발 → curl_cffi가 브라우저를 모방해 우회
-# curl_cffi 미설치 시 None으로 두고 기본 동작 (graceful degradation)
-try:
-    from curl_cffi import requests as _cffi_requests
-    _yf_session = _cffi_requests.Session(impersonate="chrome120")
-except Exception:
-    _yf_session = None
+# yfinance 1.4.1은 내부적으로 curl_cffi를 사용해 crumb을 자동 관리한다.
+# 외부에서 별도 세션을 만들어 주입하면 crumb 없는 새 세션이 생겨 오히려 401이 증가하므로
+# 외부 세션을 사용하지 않는다. _warmup_yfinance_crumb()으로 사전 crumb 획득.
+_yf_session = None
 
 _cache: dict = {}
 
@@ -196,6 +191,27 @@ def get_upbit_price(ticker: str, period: str = "1y") -> pd.DataFrame | None:
 # yfinance 일괄 다운로드
 # ─────────────────────────────────────────
 
+def _warmup_yfinance_crumb():
+    """
+    yfinance YfData 싱글톤의 crumb을 사전 획득한다.
+    
+    [중학생 설명]
+    Yahoo Finance는 요청할 때마다 "crumb"이라는 인증 토큰이 필요하다.
+    이 함수를 먼저 실행하면 토큰을 미리 받아두기 때문에
+    이후 100개 종목을 병렬로 분석해도 "401 Invalid Crumb" 오류가 나지 않는다.
+    """
+    try:
+        import yfinance as yf
+        from yfinance.data import YfData
+        yfdata = YfData()
+        if yfdata._crumb is None:
+            # SPY 1회 다운로드로 crumb 강제 획득
+            yf.download("SPY", period="1d", progress=False, auto_adjust=True)
+            print("  ✅ yfinance crumb 사전 획득 완료")
+    except Exception as e:
+        print(f"  ⚠️ crumb 워밍업 실패 (무시): {e}")
+
+
 def bulk_download(tickers, period="1y", chunk_size=50):
     """
     여러 종목의 주가 데이터를 한꺼번에 다운로드해서 캐시에 저장한다.
@@ -219,13 +235,9 @@ def bulk_download(tickers, period="1y", chunk_size=50):
         ticker_str = " ".join(묶음)
         print(f"  📥 일괄 다운로드 ({i+1}~{min(i+chunk_size, len(yf_tickers))}/{len(yf_tickers)}종목, period={period})...")
         try:
-            _dl_kwargs = dict(
-                progress=False, auto_adjust=True, group_by="ticker"
-            )
-            if _yf_session:
-                _dl_kwargs["session"] = _yf_session
             df_all = yf.download(
-                ticker_str, period=period, **_dl_kwargs
+                ticker_str, period=period,
+                progress=False, auto_adjust=True, group_by="ticker"
             )
             if df_all is None or df_all.empty:
                 continue
@@ -259,10 +271,7 @@ def get_price_data(ticker, period="1y"):
     if cache_key in _cache:
         return _cache[cache_key]
     try:
-        _dl_kwargs = dict(progress=False, auto_adjust=True)
-        if _yf_session:
-            _dl_kwargs["session"] = _yf_session
-        df = yf.download(ticker, period=period, **_dl_kwargs)
+        df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
         if df is None or df.empty:
             print(f"⚠️ {ticker} 데이터가 비어 있습니다.")
             return None
@@ -285,7 +294,7 @@ def _get_news_yfinance(ticker: str) -> list[dict]:
     if _is_upbit_ticker(ticker):
         return []
     try:
-        stock = yf.Ticker(ticker, session=_yf_session) if _yf_session else yf.Ticker(ticker)
+        stock = yf.Ticker(ticker)
         news = stock.news
         if not news:
             return []
@@ -516,11 +525,9 @@ def get_today_open(ticker: str) -> float | None:
     if _is_upbit_ticker(ticker):
         return None  # 업비트는 24시간 거래라 갭 개념 없음
     try:
-        _dl_kwargs = dict(progress=False, auto_adjust=True)
-        if _yf_session:
-            _dl_kwargs["session"] = _yf_session
         df = yf.download(
-            ticker, period="1d", interval="1m", **_dl_kwargs
+            ticker, period="1d", interval="1m",
+            progress=False, auto_adjust=True
         )
         if df is None or df.empty:
             return None
@@ -551,13 +558,9 @@ def bulk_download_weekly(tickers, period="2y", chunk_size=50):
         chunk_str = " ".join(chunk)
         try:
             import yfinance as yf
-            _wk_kwargs = dict(
-                progress=False, auto_adjust=True, group_by="ticker"
-            )
-            if _yf_session:
-                _wk_kwargs["session"] = _yf_session
             df_all = yf.download(
-                chunk_str, period=period, interval="1wk", **_wk_kwargs
+                chunk_str, period=period, interval="1wk",
+                progress=False, auto_adjust=True, group_by="ticker",
             )
             for ticker in chunk:
                 cache_key = f"{ticker}_{period}_weekly"
@@ -593,11 +596,9 @@ def get_weekly_data(ticker: str, period: str = "2y") -> pd.DataFrame | None:
     if cache_key in _cache:
         return _cache[cache_key]
     try:
-        _wk_single_kwargs = dict(progress=False, auto_adjust=True)
-        if _yf_session:
-            _wk_single_kwargs["session"] = _yf_session
         df = yf.download(
-            ticker, period=period, interval="1wk", **_wk_single_kwargs
+            ticker, period=period, interval="1wk",
+            progress=False, auto_adjust=True
         )
         if df is None or df.empty or len(df) < 26:
             return None

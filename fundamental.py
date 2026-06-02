@@ -64,26 +64,80 @@ def _dart_get(url: str, params: dict, timeout: int = 10) -> dict | None:
     return None
 
 
-def _get_yf_info(ticker: str) -> dict:
-    """yfinance .info를 캐시와 함께 가져온다. 실패 시 빈 dict 반환."""
-    if ticker in _info_cache:
-        return _info_cache[ticker]
+def _fetch_quote_summary(ticker: str) -> dict:
+    """
+    yfinance YfData 싱글톤의 crumb/세션을 재사용해서
+    v10/quoteSummary를 직접 호출한다.
+
+    [중학생 설명]
+    야후 파이낸스 .info()가 막혔을 때 우회 통로다.
+    yfinance가 이미 받아둔 crumb(인증 토큰)을 빌려서
+    직접 API를 호출하므로 새로운 인증 과정이 없어 빠르고 안정적이다.
+    """
     try:
         import yfinance as yf
-        # 문제2 수정: curl_cffi 세션으로 401 Invalid Crumb 완화
-        try:
-            from curl_cffi import requests as _cffi_req
-            _sess = _cffi_req.Session(impersonate="chrome")
-            info = yf.Ticker(ticker, session=_sess).info or {}
-        except Exception:
-            info = yf.Ticker(ticker).info or {}
-        # None인 값 제거
-        info = {k: v for k, v in info.items() if v is not None}
-        _info_cache[ticker] = info
-        return info
+        from yfinance.data import YfData
+        yfdata = YfData()
+        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+        params = {
+            "modules": "financialData,defaultKeyStatistics,summaryDetail,assetProfile",
+            "corsDomain": "finance.yahoo.com",
+            "formatted": "false",
+        }
+        result = yfdata.get_raw_json(url, params=params)
+        if not result:
+            return {}
+        data = result.get("quoteSummary", {}).get("result", [{}])
+        if not data:
+            return {}
+        merged = {}
+        for module in data[0].values():
+            if isinstance(module, dict):
+                merged.update(module)
+        return {k: v for k, v in merged.items() if v is not None}
     except Exception:
-        _info_cache[ticker] = {}
         return {}
+
+
+def _get_yf_info(ticker: str) -> dict:
+    """
+    yfinance .info를 캐시 + 재시도 + 직접 API 폴백으로 가져온다.
+
+    [중학생 설명]
+    야후 파이낸스 API는 GitHub Actions IP에서 가끔 401 오류를 낸다.
+    아래 3단계로 이 문제를 해결한다:
+      1단계: 캐시에 이미 있으면 즉시 반환 (API 호출 없음)
+      2단계: yfinance .info() 를 최대 3번 재시도 (각 실패 후 딜레이)
+      3단계: .info() 완전 실패 시 quoteSummary 직접 호출로 폴백
+    
+    핵심: 외부 curl_cffi 세션을 새로 만들지 않는다.
+    yfinance 1.4.1은 내부적으로 curl_cffi + crumb을 관리하므로
+    새 세션을 넘기면 오히려 crumb 없는 상태로 요청해서 401이 더 많이 남.
+    """
+    if ticker in _info_cache:
+        return _info_cache[ticker]
+
+    import yfinance as yf
+
+    # 최대 3회 재시도: 1초 → 2초 → 4초 백오프
+    info = {}
+    for attempt in range(3):
+        try:
+            info = yf.Ticker(ticker).info or {}
+            info = {k: v for k, v in info.items() if v is not None}
+            if info:
+                break  # 성공
+        except Exception:
+            pass
+        if attempt < 2:
+            time.sleep(2 ** attempt)  # 1s, 2s
+
+    # .info()가 비어있으면 quoteSummary 직접 호출로 폴백
+    if not info:
+        info = _fetch_quote_summary(ticker)
+
+    _info_cache[ticker] = info
+    return info
 
 
 def _safe(val, default=None):
@@ -802,3 +856,327 @@ def get_fundamentals(ticker: str, name: str, market: str,
         "fa_패널티": fa_패널티,
         "fa_표시":   fa_표시,
     }
+
+
+# ═══════════════════════════════════════════════════════════
+# 한국 기관/외국인 수급 팩터
+# ═══════════════════════════════════════════════════════════
+"""
+[추가 배경]
+한국 주식시장은 기관·외국인 수급이 주가에 미치는 영향이 매우 크다.
+개인(개미)이 살 때 기관·외국인이 팔면 단기 반등이 꺾이는 패턴이 반복됨.
+반대로 기관+외국인이 동시 순매수할 때 상승 확률이 크게 높아진다.
+
+[데이터 소스]
+KRX 정보데이터시스템 (data.krx.co.kr) — 공식, 무료, 인증 불필요
+폴백: 네이버금융 비공식 JSON API
+
+[수급 팩터 판단 기준]
+① 외국인 순매수 연속 3일 이상   → 스마트머니 유입 (보너스 +1)
+② 기관 순매수 연속 3일 이상     → 대형 매수세 확인 (보너스 +1)
+③ 외국인+기관 동시 순매수       → 가장 강력한 신호 (보너스 +1)
+④ 외국인 보유율 5일 추세 상승   → 장기 자금 유입 중 (보너스 +0.5)
+⑤ 외국인/기관 동시 순매도 연속  → 매수 신호 신뢰도 하락 (패널티 -1)
+"""
+
+# 수급 데이터 캐시 (종목별, 실행당 1회 호출)
+_supply_demand_cache: dict[str, dict] = {}
+
+# 종목코드 → KRX ISIN 코드 변환 캐시
+_isin_cache: dict[str, str] = {}
+
+
+def _get_isin(ticker_ks: str) -> str | None:
+    """
+    005930.KS → KR7005930003 형태의 ISIN 코드 변환.
+    KRX API 요청 시 ISIN 코드가 필요하다.
+    """
+    code = ticker_ks.replace(".KS", "").replace(".KQ", "").strip()
+    if code in _isin_cache:
+        return _isin_cache[code]
+    try:
+        url = "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+        params = {
+            "bld": "dbms/comm/finder/finder_stkisu",
+            "mktsel": "ALL",
+            "searchText": code,
+            "typeNo": "0",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://data.krx.co.kr",
+        }
+        r = requests.post(url, data=params, headers=headers, timeout=8)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        items = data.get("block1", [])
+        for item in items:
+            if item.get("short_isin_cd", "") == code:
+                isin = item.get("isin_cd", "")
+                _isin_cache[code] = isin
+                return isin
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_krx_supply_demand(ticker_ks: str, days: int = 10) -> pd.DataFrame | None:
+    """
+    KRX 정보데이터시스템에서 투자자별 순매수 데이터를 가져온다.
+
+    반환 컬럼:
+    - 날짜, 외국인_순매수, 기관합계_순매수, 개인_순매수
+    - 외국인_보유율
+    """
+    try:
+        isin = _get_isin(ticker_ks)
+        if not isin:
+            return None
+
+        today = datetime.now(ZoneInfo("Asia/Seoul"))
+        # 주말·공휴일 여유분 포함해서 days*2 달력일 조회
+        start = today - timedelta(days=days * 2)
+        url = "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+        params = {
+            "bld":        "dbms/MDC/STAT/standard/MDCSTAT02303",
+            "locale":     "ko_KR",
+            "isuCd":      isin,
+            "strtDd":     start.strftime("%Y%m%d"),
+            "endDd":      today.strftime("%Y%m%d"),
+            "share":      "1",
+            "money":      "1",
+            "csvxls_isNo": "false",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer":    "https://data.krx.co.kr",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        r = requests.post(url, data=params, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return None
+
+        data = r.json()
+        rows = data.get("output", [])
+        if not rows:
+            return None
+
+        records = []
+        for row in rows:
+            try:
+                # KRX 반환 필드명 (숫자에 쉼표 포함)
+                def _int(v):
+                    return int(str(v).replace(",", "").replace(" ", "") or 0)
+
+                records.append({
+                    "날짜":            row.get("TRD_DD", ""),
+                    "외국인_순매수":    _int(row.get("FRGN_NETBUY_TRDVOL", 0)),
+                    "기관합계_순매수":  _int(row.get("ORGN_NETBUY_TRDVOL", 0)),
+                    "개인_순매수":      _int(row.get("INDV_NETBUY_TRDVOL", 0)),
+                    "외국인_보유율":    float(str(row.get("FRGN_HLD_QTY_RT", 0)).replace(",", "") or 0),
+                })
+            except Exception:
+                continue
+
+        if not records:
+            return None
+
+        df = pd.DataFrame(records)
+        df["날짜"] = pd.to_datetime(df["날짜"], format="%Y/%m/%d", errors="coerce")
+        df = df.dropna(subset=["날짜"]).sort_values("날짜").tail(days)
+        return df if len(df) >= 3 else None
+
+    except Exception:
+        return None
+
+
+def _fetch_naver_supply_demand(ticker_ks: str) -> pd.DataFrame | None:
+    """
+    네이버금융 비공식 API 폴백.
+    KRX API 실패 시 사용. 외국인 순매수/보유율 데이터 제공.
+    """
+    try:
+        code = ticker_ks.replace(".KS", "").replace(".KQ", "").strip()
+        url = f"https://finance.naver.com/item/frgn.naver?code={code}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer":    "https://finance.naver.com",
+        }
+        r = requests.get(url, headers=headers, timeout=8)
+        if r.status_code != 200:
+            return None
+
+        # BeautifulSoup으로 테이블 파싱
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(r.text, "html.parser")
+        table = soup.find("table", {"class": "type2"})
+        if not table:
+            return None
+
+        records = []
+        for row in table.find_all("tr")[2:12]:  # 최근 10일
+            cols = row.find_all("td")
+            if len(cols) < 4:
+                continue
+            try:
+                def _int(v):
+                    t = v.get_text(strip=True).replace(",", "").replace("+", "")
+                    return int(t) if t and t != "-" else 0
+
+                def _float(v):
+                    t = v.get_text(strip=True).replace(",", "")
+                    return float(t) if t and t != "-" else 0.0
+
+                records.append({
+                    "날짜":           cols[0].get_text(strip=True),
+                    "외국인_순매수":   _int(cols[2]),
+                    "기관합계_순매수": _int(cols[3]) if len(cols) > 3 else 0,
+                    "개인_순매수":     0,
+                    "외국인_보유율":   _float(cols[1]) if len(cols) > 1 else 0.0,
+                })
+            except Exception:
+                continue
+
+        if not records:
+            return None
+
+        df = pd.DataFrame(records)
+        df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
+        df = df.dropna(subset=["날짜"]).sort_values("날짜")
+        return df if len(df) >= 3 else None
+
+    except Exception:
+        return None
+
+
+def get_kr_supply_demand(ticker: str) -> dict:
+    """
+    한국 주식 기관/외국인 수급 팩터를 분석한다.
+    KRX API → 네이버금융 순으로 폴백.
+
+    반환 dict:
+    {
+      "보너스":          int,   # 수급 점수 합산 (+1~+3 / -1)
+      "표시문구":        str,   # 텔레그램 알림용 한 줄 요약
+      "외국인_연속":     int,   # 외국인 순매수 연속 일수 (음수=연속 매도)
+      "기관_연속":       int,   # 기관 순매수 연속 일수
+      "동시순매수":      bool,  # 외국인+기관 동시 순매수 여부
+      "외국인_보유율_추세": str, # "상승" / "하락" / "횡보"
+      "데이터_없음":     bool,  # API 실패 시 True
+    }
+    """
+    _빈_결과 = {
+        "보너스": 0, "표시문구": "",
+        "외국인_연속": 0, "기관_연속": 0,
+        "동시순매수": False, "외국인_보유율_추세": "횡보",
+        "데이터_없음": True,
+    }
+
+    # KR 종목만 처리
+    if not (ticker.endswith(".KS") or ticker.endswith(".KQ")):
+        return _빈_결과
+
+    # 캐시 확인
+    if ticker in _supply_demand_cache:
+        return _supply_demand_cache[ticker]
+
+    # 데이터 수집 (KRX → 네이버 폴백)
+    df = _fetch_krx_supply_demand(ticker, days=10)
+    if df is None:
+        df = _fetch_naver_supply_demand(ticker)
+    if df is None:
+        _supply_demand_cache[ticker] = _빈_결과
+        return _빈_결과
+
+    try:
+        # ── 연속 순매수 일수 계산 ─────────────────────────
+        def _연속일수(series: pd.Series) -> int:
+            """
+            가장 최근 날짜부터 거슬러 올라가며 연속 양수(매수)·음수(매도) 일수 반환.
+            양수면 연속 매수, 음수면 연속 매도.
+            """
+            vals = series.tolist()[::-1]  # 최신 → 과거
+            if not vals:
+                return 0
+            방향 = 1 if vals[0] > 0 else -1
+            count = 0
+            for v in vals:
+                if (방향 > 0 and v > 0) or (방향 < 0 and v < 0):
+                    count += 1
+                else:
+                    break
+            return count * 방향
+
+        외국인_연속 = _연속일수(df["외국인_순매수"])
+        기관_연속   = _연속일수(df["기관합계_순매수"])
+
+        # 오늘(최신) 기준 동시 순매수
+        최신 = df.iloc[-1]
+        동시순매수 = bool(최신["외국인_순매수"] > 0 and 최신["기관합계_순매수"] > 0)
+        동시순매도 = bool(최신["외국인_순매수"] < 0 and 최신["기관합계_순매수"] < 0)
+
+        # 외국인 보유율 5일 추세
+        if "외국인_보유율" in df.columns and len(df) >= 5:
+            보유율_5일전 = df["외국인_보유율"].iloc[-5]
+            보유율_현재  = df["외국인_보유율"].iloc[-1]
+            diff = 보유율_현재 - 보유율_5일전
+            if diff > 0.2:
+                보유율_추세 = "상승"
+            elif diff < -0.2:
+                보유율_추세 = "하락"
+            else:
+                보유율_추세 = "횡보"
+        else:
+            보유율_추세 = "횡보"
+
+        # ── 수급 점수 계산 ─────────────────────────────────
+        보너스 = 0
+        표시_파츠 = []
+
+        # ① 외국인 연속 3일 이상 순매수
+        if 외국인_연속 >= 3:
+            보너스 += 1
+            표시_파츠.append(f"외국인 {외국인_연속}일 연속매수")
+
+        # ② 기관 연속 3일 이상 순매수
+        if 기관_연속 >= 3:
+            보너스 += 1
+            표시_파츠.append(f"기관 {기관_연속}일 연속매수")
+
+        # ③ 외국인+기관 동시 순매수 (당일)
+        if 동시순매수:
+            보너스 += 1
+            표시_파츠.append("외국인+기관 동시매수")
+
+        # ④ 외국인 보유율 상승 추세
+        if 보유율_추세 == "상승":
+            보너스 += 0  # 단독으로는 점수 부여 안 함, 표시만
+            표시_파츠.append(f"외국인보유율↑{df['외국인_보유율'].iloc[-1]:.1f}%")
+
+        # ⑤ 외국인+기관 동시 연속 매도 → 패널티
+        if 외국인_연속 <= -3 and 기관_연속 <= -3:
+            보너스 -= 1
+            표시_파츠.append(f"⚠️외국인·기관 동반매도{abs(외국인_연속)}일")
+        elif 동시순매도:
+            보너스 -= 1
+            표시_파츠.append("⚠️외국인·기관 동시매도")
+
+        표시문구 = " | ".join(표시_파츠) if 표시_파츠 else ""
+
+        결과 = {
+            "보너스":             보너스,
+            "표시문구":           표시문구,
+            "외국인_연속":        외국인_연속,
+            "기관_연속":          기관_연속,
+            "동시순매수":         동시순매수,
+            "외국인_보유율_추세": 보유율_추세,
+            "데이터_없음":        False,
+        }
+        _supply_demand_cache[ticker] = 결과
+        return 결과
+
+    except Exception as e:
+        print(f"⚠️ {ticker} 수급 분석 오류: {e}")
+        _supply_demand_cache[ticker] = _빈_결과
+        return _빈_결과

@@ -25,7 +25,7 @@ def check_portfolio_alerts(포트폴리오, settings):
     알림_목록 = []
 
     TARGET = settings.get("TARGET_PROFIT", 25)
-    STOP   = settings.get("STOP_LOSS",    -7)
+    STOP   = settings.get("STOP_LOSS",    -5)
 
     for 종목 in 포트폴리오:
         ticker   = 종목["ticker"]

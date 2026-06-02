@@ -327,9 +327,22 @@ def _calc_bear_score_from_data(
     vix_df: pd.DataFrame | None,
 ) -> int:
     """
-    이미 다운로드한 데이터로 하락 레짐 점수를 계산한다.
-    [버그4 수정] 기존 _calc_bear_score()의 중복 다운로드 제거.
-    [버그4 수정] nan 안전 처리 추가.
+    이미 다운로드한 데이터 + 선행지표로 하락 레짐 점수를 계산한다.
+
+    [선행지표 추가 — 수정 이유]
+    MA200, KOSPI, VIX는 모두 후행 지표다.
+    하락장이 시작되고 MA가 꺾인 다음에야 CORRECTION으로 바뀐다.
+    이미 10~15% 빠진 뒤에 경고가 오는 문제를 개선하기 위해
+    선행 지표 2가지를 추가한다:
+
+    ① 10년물 국채금리(^TNX): 빠르게 오르면(전월 대비 +0.3%p 이상)
+       기업 대출비용 상승 + 주식 밸류에이션 압박 → 선제 경고
+       역사적으로 금리 급등 후 3~6개월 내 증시 조정 발생
+
+    ② CBOE 풋/콜 비율(^PCCE, equity put/call):
+       투자자들이 하락 헤지(풋 옵션)를 얼마나 사는지를 나타냄
+       0.8 이상 = 시장 참여자 다수가 하락에 베팅 중 → 선제 경고
+       MA200/VIX보다 1~2주 앞서 반응하는 선행 지표
     """
     score = 0
     try:
@@ -360,7 +373,37 @@ def _calc_bear_score_from_data(
                 score += 1
 
     except Exception as e:
-        print(f"⚠️ bear_score 계산 오류: {e}")
+        print(f"⚠️ bear_score 후행지표 계산 오류: {e}")
+
+    # ── 선행지표 ①: 10년물 국채금리 급등 ─────────────────────────
+    try:
+        tnx_df = _get_price("^TNX", period="3mo")
+        if tnx_df is not None and len(tnx_df) >= 22:
+            tnx = tnx_df["Close"].squeeze()
+            현재_금리  = _safe_float(tnx.iloc[-1])
+            한달전_금리 = _safe_float(tnx.iloc[-22])  # 약 1개월 전
+            if 현재_금리 > 0 and 한달전_금리 > 0:
+                금리_상승폭 = 현재_금리 - 한달전_금리  # %p 단위
+                if 금리_상승폭 >= 0.3:  # 한 달 사이 0.3%p 이상 급등
+                    score += 1
+                    print(f"  ⚠️ 10Y 금리 급등 ({한달전_금리:.2f}% → {현재_금리:.2f}%, +{금리_상승폭:.2f}%p) → bear_score +1")
+    except Exception as e:
+        pass  # 금리 데이터 실패 시 무시 (yfinance 미지원 환경 대비)
+
+    # ── 선행지표 ②: CBOE 주식 풋/콜 비율 ─────────────────────────
+    try:
+        pcce_df = _get_price("^PCCE", period="1mo")
+        if pcce_df is not None and len(pcce_df) >= 5:
+            pcce = pcce_df["Close"].squeeze()
+            현재_pcce = _safe_float(pcce.iloc[-1])
+            평균_pcce  = _safe_float(pcce.rolling(5).mean().iloc[-1])
+            # 풋/콜 비율 0.8 이상: 하락 헤지 수요 급증
+            # 또는 5일 평균 대비 20% 이상 급등: 단기 공포 급증
+            if 현재_pcce >= 0.8 or (평균_pcce > 0 and 현재_pcce > 평균_pcce * 1.2):
+                score += 1
+                print(f"  ⚠️ 풋/콜 비율 급등 ({현재_pcce:.2f}) → 하락 헤지 수요 증가 → bear_score +1")
+    except Exception as e:
+        pass  # 풋/콜 데이터 실패 시 무시
 
     return score
 
