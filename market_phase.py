@@ -339,7 +339,7 @@ def _calc_bear_score_from_data(
        기업 대출비용 상승 + 주식 밸류에이션 압박 → 선제 경고
        역사적으로 금리 급등 후 3~6개월 내 증시 조정 발생
 
-    ② CBOE 풋/콜 비율(^PCCE, equity put/call):
+    ② 시장 공포 지수 (^PCALL → ^VVIX → ^VIX3M → VIX모멘텀 순 폴백):
        투자자들이 하락 헤지(풋 옵션)를 얼마나 사는지를 나타냄
        0.8 이상 = 시장 참여자 다수가 하락에 베팅 중 → 선제 경고
        MA200/VIX보다 1~2주 앞서 반응하는 선행 지표
@@ -390,20 +390,46 @@ def _calc_bear_score_from_data(
     except Exception as e:
         pass  # 금리 데이터 실패 시 무시 (yfinance 미지원 환경 대비)
 
-    # ── 선행지표 ②: CBOE 주식 풋/콜 비율 ─────────────────────────
+    # ── 선행지표 ②: 시장 공포/헤지 수요 지표 ─────────────────────
+    # ^PCCE(CBOE Equity Put/Call)가 yfinance에서 상장 폐지됨 → 대체 심볼 순서대로 시도
+    # 대체 순서: ^PCALL(전체 P/C) → ^VVIX(VIX의 변동성) → VIX 급등 모멘텀
     try:
-        pcce_df = _get_price("^PCCE", period="1mo")
-        if pcce_df is not None and len(pcce_df) >= 5:
-            pcce = pcce_df["Close"].squeeze()
-            현재_pcce = _safe_float(pcce.iloc[-1])
-            평균_pcce  = _safe_float(pcce.rolling(5).mean().iloc[-1])
-            # 풋/콜 비율 0.8 이상: 하락 헤지 수요 급증
-            # 또는 5일 평균 대비 20% 이상 급등: 단기 공포 급증
-            if 현재_pcce >= 0.8 or (평균_pcce > 0 and 현재_pcce > 평균_pcce * 1.2):
+        공포_지수_심볼 = None
+        공포_df = None
+        for sym in ["^PCALL", "^VVIX", "^VIX3M"]:
+            try:
+                df_시도 = _get_price(sym, period="1mo")
+                if df_시도 is not None and len(df_시도) >= 5:
+                    공포_지수_심볼 = sym
+                    공포_df = df_시도
+                    break
+            except Exception:
+                continue
+
+        if 공포_df is not None:
+            공포 = 공포_df["Close"].squeeze()
+            현재값 = _safe_float(공포.iloc[-1])
+            평균값 = _safe_float(공포.rolling(5).mean().iloc[-1])
+            if 공포_지수_심볼 == "^PCALL":
+                발동 = 현재값 >= 0.8 or (평균값 > 0 and 현재값 > 평균값 * 1.2)
+            elif 공포_지수_심볼 == "^VVIX":
+                발동 = 현재값 >= 95 or (평균값 > 0 and 현재값 > 평균값 * 1.15)
+            else:
+                발동 = 현재값 >= 25
+            if 발동:
                 score += 1
-                print(f"  ⚠️ 풋/콜 비율 급등 ({현재_pcce:.2f}) → 하락 헤지 수요 증가 → bear_score +1")
-    except Exception as e:
-        pass  # 풋/콜 데이터 실패 시 무시
+                print(f"  ⚠️ 공포 지수 급등 ({공포_지수_심볼}={현재값:.2f}) → 하락 헤지 수요 증가 → bear_score +1")
+        else:
+            # 모든 공포 지수 실패 → VIX 5일 급등 모멘텀으로 대체
+            if vix_df is not None and len(vix_df) >= 6:
+                vx = vix_df["Close"].squeeze()
+                vix_현재 = _safe_float(vx.iloc[-1])
+                vix_5일전 = _safe_float(vx.iloc[-6])
+                if vix_5일전 > 0 and vix_현재 / vix_5일전 >= 1.3:
+                    score += 1
+                    print(f"  ⚠️ VIX 5일 급등 ({vix_5일전:.1f}→{vix_현재:.1f}) → bear_score +1")
+    except Exception:
+        pass
 
     return score
 

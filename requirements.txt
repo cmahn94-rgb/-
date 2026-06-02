@@ -8,3 +8,4 @@ schedule
 anthropic
 feedparser
 beautifulsoup4
+finance-datareader

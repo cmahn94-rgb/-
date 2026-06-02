@@ -1050,6 +1050,70 @@ def _fetch_naver_supply_demand(ticker_ks: str) -> pd.DataFrame | None:
         return None
 
 
+def _fetch_fdr_supply_demand(ticker_ks: str) -> pd.DataFrame | None:
+    """
+    FinanceDataReader로 투자자별 매매 데이터를 가져온다.
+
+    KRX API와 네이버금융 모두 실패할 경우 사용하는 3차 폴백.
+    FDR은 KRX/네이버 데이터를 내부적으로 활용하므로
+    GitHub Actions IP에서도 동작할 가능성이 있다.
+    """
+    try:
+        import FinanceDataReader as fdr
+        code = ticker_ks.replace(".KS", "").replace(".KQ", "").strip()
+        today = datetime.now(ZoneInfo("Asia/Seoul"))
+        start = today - timedelta(days=30)
+        df = fdr.DataReader(
+            f"KRX:{code}",
+            start.strftime("%Y-%m-%d"),
+            today.strftime("%Y-%m-%d")
+        )
+        if df is None or df.empty:
+            return None
+        # FDR 컬럼명 표준화
+        col_map = {}
+        for col in df.columns:
+            cl = col.lower()
+            if "foreign" in cl or "외국" in cl or "frgn" in cl:
+                col_map[col] = "외국인_순매수"
+            elif "institution" in cl or "기관" in cl or "organ" in cl:
+                col_map[col] = "기관합계_순매수"
+        if not col_map:
+            return None
+        df = df.rename(columns=col_map)
+        if "외국인_순매수" not in df.columns:
+            return None
+        if "기관합계_순매수" not in df.columns:
+            df["기관합계_순매수"] = 0
+        df["개인_순매수"] = 0
+        df["외국인_보유율"] = 0.0
+        df["날짜"] = df.index
+        df = df[["날짜", "외국인_순매수", "기관합계_순매수", "개인_순매수", "외국인_보유율"]]
+        df = df.dropna(subset=["날짜"]).sort_values("날짜").tail(10)
+        return df if len(df) >= 3 else None
+    except Exception:
+        return None
+
+
+def _fetch_yfinance_institutional(ticker_ks: str) -> dict | None:
+    """
+    yfinance .info에서 기관 보유율 데이터를 가져온다.
+
+    일별 수급이 아닌 분기별 보유율이지만,
+    KRX/네이버/FDR 모두 실패했을 때 최소한의 정보를 제공한다.
+    heldPercentInstitutions: 기관 보유 비율 (0.0~1.0)
+    """
+    try:
+        import yfinance as yf
+        info = yf.Ticker(ticker_ks).info or {}
+        inst_pct = info.get("heldPercentInstitutions")
+        if inst_pct is None:
+            return None
+        return {"기관_보유율": round(inst_pct * 100, 1)}
+    except Exception:
+        return None
+
+
 def get_kr_supply_demand(ticker: str) -> dict:
     """
     한국 주식 기관/외국인 수급 팩터를 분석한다.
@@ -1081,11 +1145,26 @@ def get_kr_supply_demand(ticker: str) -> dict:
     if ticker in _supply_demand_cache:
         return _supply_demand_cache[ticker]
 
-    # 데이터 수집 (KRX → 네이버 폴백)
+    # 데이터 수집: KRX → 네이버 → FDR → yfinance 기관보유율 4중 폴백
     df = _fetch_krx_supply_demand(ticker, days=10)
     if df is None:
         df = _fetch_naver_supply_demand(ticker)
     if df is None:
+        df = _fetch_fdr_supply_demand(ticker)
+    if df is None:
+        # 4차 폴백: yfinance 기관 보유율 (일별 수급 없음, 방향성만 표시)
+        yf_inst = _fetch_yfinance_institutional(ticker)
+        if yf_inst:
+            기관_보유율 = yf_inst["기관_보유율"]
+            결과 = {
+                "보너스": 0,
+                "표시문구": f"기관보유율 {기관_보유율:.1f}% (분기 기준, 일별수급 조회실패)",
+                "외국인_연속": 0, "기관_연속": 0,
+                "동시순매수": False, "외국인_보유율_추세": "횡보",
+                "데이터_없음": True,
+            }
+            _supply_demand_cache[ticker] = 결과
+            return 결과
         _supply_demand_cache[ticker] = _빈_결과
         return _빈_결과
 
