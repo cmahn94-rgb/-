@@ -194,22 +194,51 @@ def get_upbit_price(ticker: str, period: str = "1y") -> pd.DataFrame | None:
 def _warmup_yfinance_crumb():
     """
     yfinance YfData 싱글톤의 crumb을 사전 획득한다.
-    
+
     [중학생 설명]
     Yahoo Finance는 요청할 때마다 "crumb"이라는 인증 토큰이 필요하다.
     이 함수를 먼저 실행하면 토큰을 미리 받아두기 때문에
     이후 100개 종목을 병렬로 분석해도 "401 Invalid Crumb" 오류가 나지 않는다.
+
+    crumb 획득 확인 후 실패 시 최대 3회 재시도.
     """
+    import time as _time
     try:
         import yfinance as yf
         from yfinance.data import YfData
-        yfdata = YfData()
-        if yfdata._crumb is None:
-            # SPY 1회 다운로드로 crumb 강제 획득
-            yf.download("SPY", period="1d", progress=False, auto_adjust=True)
-            print("  ✅ yfinance crumb 사전 획득 완료")
+
+        for attempt in range(3):
+            try:
+                yfdata = YfData()
+                if yfdata._crumb is not None:
+                    # 이미 crumb 있음
+                    print("  ✅ yfinance crumb 이미 보유 — 워밍업 건너뜀")
+                    return
+
+                # SPY + QQQ 순서로 다운로드해서 crumb 강제 획득
+                # SPY가 실패해도 QQQ에서 crumb을 얻을 수 있음
+                for sym in ["SPY", "QQQ"]:
+                    try:
+                        yf.download(sym, period="1d", progress=False, auto_adjust=True)
+                    except Exception:
+                        pass
+
+                # crumb 획득 확인
+                yfdata2 = YfData()
+                if yfdata2._crumb is not None:
+                    print(f"  ✅ yfinance crumb 사전 획득 완료 (시도 {attempt+1}회)")
+                    return
+
+            except Exception:
+                pass
+
+            if attempt < 2:
+                _time.sleep(2)
+
+        print("  ⚠️ crumb 워밍업 3회 모두 실패 — 계속 진행 (일부 401 발생 가능)")
+
     except Exception as e:
-        print(f"  ⚠️ crumb 워밍업 실패 (무시): {e}")
+        print(f"  ⚠️ crumb 워밍업 오류 (무시): {e}")
 
 
 def bulk_download(tickers, period="1y", chunk_size=50):

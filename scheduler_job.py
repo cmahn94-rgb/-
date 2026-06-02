@@ -971,6 +971,9 @@ def run_analysis(include_crypto=True, include_markets=None):
     print(f"  🚀 사전 일괄 다운로드 시작 (총 {len(전체_티커)}개 티커)...")
     # crumb 사전 획득: 병렬 .info() 호출 전에 yfinance 세션 워밍업
     _warmup_yfinance_crumb()
+    # crumb이 Yahoo 서버에 완전히 등록되도록 3초 대기
+    # 너무 빨리 bulk_download를 시작하면 crumb 없는 요청이 섞여 401 발생
+    time.sleep(3)
     bulk_download(전체_티커, period="1y")
     bulk_download(전체_티커, period="3mo")
     bulk_download(전체_티커, period="5d")
@@ -1111,26 +1114,41 @@ def run_analysis(include_crypto=True, include_markets=None):
     # 나중에 실제 수익률과 비교해 시스템 신뢰도를 측정할 수 있다.
     _record_signals(신호_종목_요약)
 
-    # ── HTML 리포트 생성 (GitHub Pages 대시보드) ─────────────────
-    # 텔레그램은 텍스트 서식만 지원하지만 HTML 리포트는 시각적으로 풍부하게 표시됨.
-    # docs/ 폴더에 날짜별 HTML 파일을 누적 저장하고 GitHub Pages로 공개.
-    # GH_PAGES_URL 환경변수가 있을 때만 링크를 텔레그램 메시지에 추가.
+    # ── HTML 리포트 생성 + 링크 파일 저장 ───────────────────────
+    # GH_PAGES_URL이 있으면 텔레그램 전송을 workflow로 위임.
+    # 이유: python main.py 실행 직후 git push가 되고, Pages 배포는 1~2분 더 걸림.
+    #       링크를 먼저 보내면 아직 파일이 없어서 404가 남.
+    #       git push 완료 후 workflow에서 링크를 전송해야 정상 접속됨.
     gh_pages_url = os.environ.get("GH_PAGES_URL", "").rstrip("/")
     try:
         from report_generator import generate_html_report
         phase_str = phase_result.phase.value if phase_result else ""
         파일명, _ = generate_html_report(리포트, phase_str, 지금)
+
         if gh_pages_url:
+            # 링크를 파일로 저장 → workflow의 텔레그램 전송 step에서 읽어서 전송
+            링크_메시지 = (
+                f"⚔️ 퀀트 리포트 준비됐습니다\n"
+                f"📊 [{파일명}]({gh_pages_url}/{파일명})\n"
+                f"📋 [전체 목록]({gh_pages_url}/index.html)\n"
+                f"🕐 {지금}"
+            )
+            with open("docs/.pending_link.txt", "w", encoding="utf-8") as f:
+                f.write(링크_메시지)
+            print(f"  🌐 HTML 링크 저장 (git push 후 전송 예정): {gh_pages_url}/{파일명}")
+            # GH_PAGES_URL이 있으면 텔레그램에 텍스트 리포트 전송 안 함
+            # (링크만 전송 — workflow에서 처리)
+            print("✅ 분석 완료 (텔레그램 전송은 git push 후 workflow에서 처리)")
+            return
+        else:
+            # GH_PAGES_URL 없으면 기존처럼 텍스트 리포트 전송
             리포트 += (
                 f"\n─────────────────────────\n"
-                f"📊 *HTML 대시보드*\n"
-                f"  [{파일명}]({gh_pages_url}/{파일명})\n"
-                f"  [전체 목록 보기]({gh_pages_url}/index.html)\n"
+                f"📄 HTML 리포트 생성됨 (링크 미설정)\n"
             )
-            print(f"  🌐 HTML 링크: {gh_pages_url}/{파일명}")
     except Exception as e:
         print(f"  ⚠️ HTML 리포트 생성 실패 (무시): {e}")
 
-    # 텔레그램 전송
+    # GH_PAGES_URL 없을 때만 여기 도달 (텍스트 리포트 전송)
     send_telegram(리포트)
     print("✅ 분석 완료 및 리포트 전송")
