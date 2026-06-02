@@ -3,31 +3,34 @@ name: Quant Strategy Daily Run
 on:
   schedule:
     # ─────────────────────────────────────────────────────────────
-    # [중요] GitHub Actions cron은 UTC 기준으로 동작한다.
-    # KST = UTC + 9 이므로, 원하는 KST 시각에서 9를 빼면 UTC 시각이 된다.
+    # [중요] GitHub Actions cron은 UTC 기준이다.
+    # KST(한국) = UTC + 9 이므로, 원하는 KST 시각에서 9를 빼면 UTC 시각이 된다.
     #
-    # [알림이 제시간에 안 오는 이유 5가지]
-    # 1) GitHub Actions 서버 부하로 인해 최대 15~20분 지연 가능 (공식 허용)
-    #    → 해결: 원하는 시각보다 5~10분 일찍 예약
-    # 2) 동시에 2개 이상 실행이 겹쳐서 queue 대기 발생
-    #    → 해결: concurrency + cancel-in-progress: true
-    # 3) 이전 실행이 끝나지 않아 다음 실행이 막힘
-    #    → 해결: timeout-minutes 설정으로 강제 종료
-    # 4) Python 스크립트 자체가 에러로 일찍 종료됨
-    #    → 해결: 아래 "실패 알림" step에서 텔레그램으로 바로 알림 수신
-    # 5) GitHub Actions 자체 서비스 장애 (월 1~2회)
-    #    → 해결: workflow_dispatch로 수동 즉시 실행 가능
+    # 계산 예시:
+    #   KST 09:00 → UTC 00:00  (자정)
+    #   KST 15:30 → UTC 06:30
+    #   KST 23:30 → UTC 14:30
     #
-    # 현재 예약 시각 (원하는 KST 시각보다 5분 일찍 설정):
+    # [새벽에 알림이 오는 원인과 해결책]
+    # cron-job.org 같은 외부 트리거 서비스를 UTC/KST 혼동해서 설정하면
+    # 예상과 9시간 다른 시각에 실행된다.
+    # → 이 파일의 GitHub Actions 내장 cron만 사용하고 외부 트리거는 제거할 것.
+    #
+    # GitHub Actions cron 지연: 서버 부하 시 최대 5~10분 지연 가능.
+    # 아래 시각은 정각보다 0분으로 설정 (5분 버퍼 불필요, 실제 지연은 1~3분 수준)
     # ─────────────────────────────────────────────────────────────
-    # 09:00 KST (한국 장 시작) 원하면 → 08:55 KST = 23:55 UTC (전날)
-    - cron: '55 23 * * 0-4'   # 일~목 23:55 UTC = 월~금 08:55 KST
 
-    # 15:30 KST (한국 장 마감) 원하면 → 15:25 KST = 06:25 UTC
-    - cron: '25 6 * * 1-5'    # 월~금 06:25 UTC = 월~금 15:25 KST
+    # 09:00 KST — 한국 장 시작 (국내주식 + 크립토만 분석)
+    # KST 09:00 = UTC 00:00
+    - cron: '0 0 * * 1-5'     # 월~금 00:00 UTC = 월~금 09:00 KST
 
-    # 23:30 KST (미국 장 중반) 원하면 → 23:25 KST = 14:25 UTC
-    - cron: '25 14 * * 1-5'   # 월~금 14:25 UTC = 월~금 23:25 KST
+    # 15:30 KST — 한국 장 마감 (국내주식 + 크립토만 분석)
+    # KST 15:30 = UTC 06:30
+    - cron: '30 6 * * 1-5'    # 월~금 06:30 UTC = 월~금 15:30 KST
+
+    # 23:30 KST — 미국 장 중반 (전체 분석: KR + US + 크립토)
+    # KST 23:30 = UTC 14:30
+    - cron: '30 14 * * 1-5'   # 월~금 14:30 UTC = 월~금 23:30 KST
 
   # 수동 실행: GitHub 웹사이트 Actions 탭 → "Run workflow" 버튼으로 즉시 실행 가능
   workflow_dispatch:
@@ -44,6 +47,10 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    # docs/ 폴더를 커밋·푸시하기 위해 쓰기 권한 필요
+    permissions:
+      contents: write
 
     # 평균 실행 시간(~3분)의 5배 = 15분으로 설정.
     # 이 시간을 초과하면 GitHub Actions가 강제 종료.
@@ -75,7 +82,40 @@ jobs:
           NEWSAPI_KEY:          ${{ secrets.NEWSAPI_KEY }}
           DART_API_KEY:         ${{ secrets.DART_API_KEY }}
           GROQ_API_KEY:         ${{ secrets.GROQ_API_KEY }}
+          # GitHub Pages URL — 텔레그램 메시지에 HTML 링크로 포함됨
+          # 형식: https://[계정명].github.io/[레포명]
+          # 예시: https://chulmin.github.io/quant-bot
+          # 설정 안 하면 HTML은 생성되지만 텔레그램 링크는 안 붙음
+          GH_PAGES_URL:         ${{ secrets.GH_PAGES_URL }}
         run: python main.py
+
+      # ── HTML 리포트 → docs/ 폴더 → GitHub Pages 배포 ────────────
+      # python main.py 실행 중 docs/ 폴더에 HTML 파일이 생성됨.
+      # 이 step에서 변경된 파일을 main 브랜치에 커밋·푸시하면
+      # GitHub Pages(main/docs 설정)가 자동으로 공개 사이트를 갱신한다.
+      #
+      # [GitHub Pages 첫 설정 방법]
+      # 레포 → Settings → Pages → Source: main / docs → Save
+      # 이후 https://[계정명].github.io/[레포명] 으로 접속 가능
+      - name: Push HTML report to GitHub Pages
+        if: success()
+        run: |
+          # git 사용자 설정 (GitHub Actions 봇 계정)
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # docs/ 폴더 변경사항 스테이징
+          git add docs/
+
+          # 변경사항 있을 때만 커밋 (없으면 에러 방지)
+          if git diff --cached --quiet; then
+            echo "📋 HTML 변경사항 없음 — 커밋 건너뜀"
+          else
+            KST=$(TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M KST')
+            git commit -m "📊 리포트 업데이트: ${KST}"
+            git push
+            echo "✅ GitHub Pages 배포 완료"
+          fi
 
       # ── 실행 시각 로그 ──────────────────────────────────────────
       # 텔레그램 알림이 안 왔을 때,
