@@ -1,30 +1,27 @@
 """
-ai_analyst.py — Gemini API 기반 AI 시장 해석 모듈
-==================================================
+ai_analyst.py — AI 시장 해석 모듈 (Groq 1순위 / Gemini 폴백)
+=============================================================
 이 파일이 하는 일:
-  1) get_ai_market_commentary()
-     → 현재 시장 레짐 + 상위 신호 종목 요약을 Gemini에게 전달
-     → 짧고 실용적인 시장 해석 코멘트 생성
-  2) get_ai_signal_reasons_batch()
-     → 여러 종목의 매수 신호 이유를 한 번에 Gemini에게 요청
-  3) translate_to_korean_one_line_batch()
-     → 영어 뉴스들을 한 번의 호출로 한국어로 번역
+  1) get_ai_market_commentary()  — 시장 코멘트 생성
+  2) get_ai_signal_reasons_batch() — 종목별 신호 이유 생성
+  3) translate_to_korean_one_line_batch() — 영어 뉴스 번역
 
-[업그레이드 v3 변경사항]
-  ① 지수 백오프(Exponential Backoff) 재시도 적용
-     - 첫 실패 → 1초 대기 → 재시도
-     - 두 번째 실패 → 2초 대기 → 재시도
-     - 세 번째 실패 → 4초 대기 → 재시도
-     - 모두 실패 시 빈 문자열 반환 (리포트 전송에는 영향 없음)
-     - 503(서버 과부하), 429(요청 초과) 오류에 특히 효과적
+[v4 핵심 변경: Groq 1순위 전환]
+  기존: Gemini 호출 → 429 재시도(1+2초 낭비) → Groq 폴백
+  변경: Groq 먼저 호출 → 실패 시 Gemini 폴백
 
-  ② 배치 요청 수 제한 (BATCH_SIZE = 3   # 429 근본 해결: 무료 티어 분당 15회 기준, 배치 3개+3초 간격)
-     - AI 신호 이유, 번역 등 배치 호출을 10개씩 끊어서 처리
-     - 한 번에 100개 요청이 쏟아지던 것을 10개 × N회로 분산
-     - 이렇게 하면 429(Too Many Requests) 오류가 크게 줄어든다
+  이유:
+  - 로그에서 매 호출마다 Gemini 429 → Groq 폴백이 반복됨
+  - Groq 무료 티어: 분당 30회, 일 14,400회 (Gemini의 2배)
+  - llama-3.3-70b-versatile 품질이 번역·요약에 충분함
+  - Groq 1순위로 바꾸면 매 호출당 3초 절약
+
+  Groq 키 없으면 자동으로 Gemini 사용 (하위 호환 유지)
+  시장 브리핑(실시간 검색)은 Google Search가 필요하므로 Gemini 유지
 
 [필요 환경변수]
-  GEMINI_API_KEY — GitHub Actions Secrets에 등록 필요
+  GROQ_API_KEY    — 1순위 (https://console.groq.com, 무료)
+  GEMINI_API_KEY  — 폴백 (https://aistudio.google.com)
 """
 
 import os
@@ -35,21 +32,18 @@ from dotenv import load_dotenv
 
 
 _GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-_MODEL          = "gemini-2.5-flash"
+_GEMINI_MODEL   = "gemini-2.5-flash"
+_MODEL          = _GEMINI_MODEL  # 하위 호환용 별칭
 
-# ─────────────────────────────────────────
-# 배치 최대 크기: 한 번의 API 호출에 담을 최대 항목 수
-# 10개 초과 시 10개씩 끊어서 순차 호출 → 429 오류 방지
-# ─────────────────────────────────────────
+_GROQ_MODEL     = "llama-3.3-70b-versatile"
+_GROQ_API_URL   = "https://api.groq.com/openai/v1/chat/completions"
+
+# 배치 최대 크기
 BATCH_SIZE = 10
 
-# ─────────────────────────────────────────
-# 지수 백오프 재시도 설정
-# MAX_RETRIES = 3 → 최대 3번 재시도 (총 4번 시도)
-# BASE_DELAY  = 1 → 첫 대기 시간 1초, 이후 2배씩 증가 (1→2→4초)
-# ─────────────────────────────────────────
-MAX_RETRIES = 2
-BASE_DELAY  = 1   # 초 단위: 1→2→4초
+# Gemini 재시도 설정 (폴백용이므로 1회만 재시도)
+MAX_RETRIES = 1
+BASE_DELAY  = 1
 
 # ─────────────────────────────────────────
 # Groq API (Gemini 429 폴백)
@@ -57,44 +51,115 @@ BASE_DELAY  = 1   # 초 단위: 1→2→4초
 
 def _call_groq(prompt: str, max_tokens: int = 500) -> str:
     """
-    Groq API로 텍스트를 생성한다. Gemini 429 오류 시 폴백으로 사용.
+    Groq API로 텍스트를 생성한다. (v4부터 1순위)
 
     [중학생 설명]
-    Groq는 Gemini와 비슷한 AI API인데, 무료 한도가 Gemini보다 2배 많다.
-    분당 30회(Gemini: 15회), 일일 14,400회 무료.
-    Gemini가 "너무 많이 요청했어(429)"라고 하면,
-    자동으로 Groq로 넘어가서 같은 작업을 해준다.
+    Groq는 무료 AI API로, Gemini보다 한도가 2배 넉넉하다.
+    분당 30회, 일 14,400회 무료.
+    llama-3.3-70b-versatile 모델을 사용한다.
 
     API 키 발급: https://console.groq.com (무료, 이메일만 필요)
     GitHub Secrets에 GROQ_API_KEY로 등록
-
-    사용 모델: llama-3.3-70b-versatile (Groq 무료 티어 최고 성능)
     """
-    import os, requests
+    load_dotenv()
     api_key = os.getenv("GROQ_API_KEY", "")
     if not api_key:
         return ""
 
     try:
         resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
+            _GROQ_API_URL,
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type":  "application/json",
             },
             json={
-                "model":      "llama-3.3-70b-versatile",
-                "messages":   [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,
+                "model":       _GROQ_MODEL,
+                "messages":    [{"role": "user", "content": prompt}],
+                "max_tokens":  max_tokens,
                 "temperature": 0.3,
             },
             timeout=20,
         )
+        if resp.status_code == 429:
+            # Groq도 한도 초과 시 Gemini로 넘어감 (드문 경우)
+            return ""
         if resp.status_code != 200:
             return ""
         return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception:
         return ""
+
+
+def _call_gemini_direct(system_prompt: str, user_content: str, max_output_tokens: int = 300) -> str:
+    """
+    Gemini API 직접 호출 (내부용). _call_ai()의 폴백으로 사용.
+    """
+    load_dotenv()
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return ""
+
+    headers = {
+        "x-goog-api-key": api_key,
+        "content-type":   "application/json",
+    }
+    url = f"{_GEMINI_API_URL}/{_GEMINI_MODEL}:generateContent"
+    payload = {
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": user_content}]}],
+        "generationConfig": {"maxOutputTokens": max_output_tokens},
+    }
+
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=25)
+            if resp.status_code in (429, 503):
+                if attempt < MAX_RETRIES:
+                    time.sleep(BASE_DELAY * (2 ** attempt))
+                    continue
+                return ""
+            resp.raise_for_status()
+            data       = resp.json()
+            candidates = data.get("candidates") or []
+            if not candidates:
+                return ""
+            parts = candidates[0].get("content", {}).get("parts", [])
+            if not parts:
+                return ""
+            text = parts[0].get("text")
+            return text.strip() if isinstance(text, str) else ""
+        except requests.exceptions.Timeout:
+            if attempt < MAX_RETRIES:
+                time.sleep(BASE_DELAY * (2 ** attempt))
+                continue
+            return ""
+        except Exception:
+            return ""
+    return ""
+
+
+def _call_ai(system_prompt: str, user_content: str, max_tokens: int = 300) -> str:
+    """
+    AI API 통합 진입점. Groq 1순위 → Gemini 폴백.
+
+    [중학생 설명]
+    Groq(무료 AI)를 먼저 시도하고, Groq 키가 없거나 실패하면
+    Gemini로 넘어간다. 로그에서 매번 Gemini 429가 뜨던 문제를
+    이 구조로 해결한다: 처음부터 Groq를 쓰면 429가 안 난다.
+    """
+    # 1순위: Groq
+    full_prompt = system_prompt + "\n\n" + user_content
+    result = _call_groq(full_prompt, max_tokens=max_tokens)
+    if result:
+        return result
+
+    # 폴백: Gemini
+    result = _call_gemini_direct(system_prompt, user_content, max_output_tokens=max_tokens)
+    if result:
+        return result
+
+    return ""
 
 
 
@@ -104,83 +169,15 @@ _TRANSLATION_CACHE: dict[str, str] = {}
 
 def _call_gemini(system_prompt: str, user_content: str, max_output_tokens: int = 300) -> str:
     """
-    Gemini API를 호출하고 텍스트 응답을 반환한다.
-    서버 과부하(503) 또는 요청 초과(429) 시 지수 백오프로 재시도하고,
-    최종 실패 시 Groq API(llama-3.3-70b)로 자동 폴백한다.
-    API 키 없음 또는 모든 시도 실패 시 빈 문자열을 반환한다.
+    AI API 호출 래퍼 (하위 호환용).
+    내부적으로 _call_ai(Groq 1순위 → Gemini 폴백)를 사용한다.
+
+    [v4 변경]
+    기존: Gemini 직접 호출 → 429 재시도 낭비 → Groq 폴백
+    변경: _call_ai()를 통해 Groq를 먼저 시도 → 속도 향상
+    외부에서 _call_gemini()를 호출하는 코드는 수정 없이 그대로 동작한다.
     """
-    load_dotenv()
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return ""   # API 키 없으면 AI 분석 생략 (리포트는 정상 발송됨)
-
-    headers = {
-        "x-goog-api-key": api_key,
-        "content-type":   "application/json",
-    }
-    url = f"{_GEMINI_API_URL}/{_MODEL}:generateContent"
-    payload = {
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "contents": [{"role": "user", "parts": [{"text": user_content}]}],
-        "generationConfig": {"maxOutputTokens": max_output_tokens},
-    }
-
-    # ── 지수 백오프 재시도 루프 ──────────────────────────────
-    # 시도 횟수: 0(첫 시도), 1(1초 뒤), 2(2초 뒤), 3(4초 뒤)
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=25)
-
-            # 429(요청 초과) 또는 503(서버 과부하)이면 재시도 대상
-            if resp.status_code in (429, 503):
-                if attempt < MAX_RETRIES:
-                    대기_시간 = BASE_DELAY * (2 ** attempt)  # 1 → 2 → 4초
-                    print(
-                        f"⏳ Gemini API {resp.status_code} 오류 "
-                        f"(시도 {attempt + 1}/{MAX_RETRIES + 1}) "
-                        f"→ {대기_시간}초 후 재시도..."
-                    )
-                    time.sleep(대기_시간)
-                    continue   # 다음 attempt로
-
-                # Gemini 최종 실패 → Groq로 폴백
-                print(f"⚠️ Gemini 최대 재시도 초과 → Groq 폴백 시도")
-                groq_결과 = _call_groq(f"{system_prompt}\n\n{user_content}", max_tokens=400)
-                if groq_결과:
-                    print(f"  ✅ Groq 폴백 성공")
-                    return groq_결과
-                return ""
-
-            # 그 외 오류(400, 401 등)는 재시도 없이 즉시 반환
-            resp.raise_for_status()
-
-            data       = resp.json()
-            candidates = data.get("candidates") or []
-            if not candidates:
-                return ""
-            content = candidates[0].get("content") or {}
-            parts   = content.get("parts") or []
-            if not parts:
-                return ""
-            text = parts[0].get("text")
-            return text.strip() if isinstance(text, str) else ""
-
-        except requests.exceptions.Timeout:
-            # 타임아웃도 재시도 대상
-            if attempt < MAX_RETRIES:
-                대기_시간 = BASE_DELAY * (2 ** attempt)
-                print(f"⏳ Gemini API 타임아웃 (시도 {attempt + 1}) → {대기_시간}초 후 재시도...")
-                time.sleep(대기_시간)
-                continue
-            print("⚠️ AI 분석 오류 (타임아웃 반복): 분석 생략")
-            return ""
-
-        except Exception as e:
-            # 예상치 못한 오류는 재시도 없이 즉시 반환
-            print(f"⚠️ AI 분석 오류 (무시하고 계속): {e}")
-            return ""
-
-    return ""   # 모든 재시도 소진
+    return _call_ai(system_prompt, user_content, max_tokens=max_output_tokens)
 
 
 # ─────────────────────────────────────────

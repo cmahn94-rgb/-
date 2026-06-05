@@ -937,10 +937,18 @@ def _get_isin(ticker_ks: str) -> str | None:
             "typeNo": "0",
         }
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://data.krx.co.kr",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Referer":    "https://data.krx.co.kr",
+            "Origin":     "https://data.krx.co.kr",
+            "Accept":     "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
+            "X-Requested-With": "XMLHttpRequest",
         }
-        r = requests.post(url, data=params, headers=headers, timeout=8)
+        r = requests.post(url, data=params, headers=headers, timeout=10)
         if r.status_code != 200:
             return None
         data = r.json()
@@ -983,11 +991,30 @@ def _fetch_krx_supply_demand(ticker_ks: str, days: int = 10) -> pd.DataFrame | N
             "csvxls_isNo": "false",
         }
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer":    "https://data.krx.co.kr",
-            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Referer":          "https://data.krx.co.kr",
+            "Origin":           "https://data.krx.co.kr",
+            "Content-Type":     "application/x-www-form-urlencoded",
+            "Accept":           "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language":  "ko-KR,ko;q=0.9,en-US;q=0.8",
+            "X-Requested-With": "XMLHttpRequest",
         }
-        r = requests.post(url, data=params, headers=headers, timeout=10)
+        # 재시도: KRX는 첫 요청이 실패해도 한 번 더 시도하면 성공하는 경우 있음
+        r = None
+        for _attempt in range(2):
+            try:
+                r = requests.post(url, data=params, headers=headers, timeout=12)
+                if r.status_code == 200:
+                    break
+            except Exception:
+                if _attempt == 0:
+                    time.sleep(1)
+        if r is None or r.status_code != 200:
+            return None
         if r.status_code != 200:
             return None
 
@@ -1034,10 +1061,27 @@ def _fetch_naver_supply_demand(ticker_ks: str) -> pd.DataFrame | None:
         code = ticker_ks.replace(".KS", "").replace(".KQ", "").strip()
         url = f"https://finance.naver.com/item/frgn.naver?code={code}"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer":    "https://finance.naver.com",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Referer":         "https://finance.naver.com",
+            "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
         }
-        r = requests.get(url, headers=headers, timeout=8)
+        # 네이버도 한 번 재시도
+        r = None
+        for _attempt in range(2):
+            try:
+                r = requests.get(url, headers=headers, timeout=10)
+                if r.status_code == 200:
+                    break
+            except Exception:
+                if _attempt == 0:
+                    time.sleep(1)
+        if r is None or r.status_code != 200:
+            return None
         if r.status_code != 200:
             return None
 
