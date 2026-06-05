@@ -341,7 +341,10 @@ def calc_signals(ticker, name, market, settings):
             (adx_값 is not None and adx_값 >= adx_min)
         )
 
-        기본_점수 = sum([조건1_rsi, 조건2_ma, 조건3_거래량,
+        # RSI는 게이트로만 사용 (위에서 이미 통과 확인) → 점수에서 제외
+        # 이유: RSI 게이트를 통과했다 = RSI 조건 항상 True → 항상 +1점 자동 부여
+        #       이는 점수 체계를 왜곡함. 나머지 5개 조건만 점수화.
+        기본_점수 = sum([조건2_ma, 조건3_거래량,
                         조건4_볼린저, 조건5_macd, 조건6_변동성돌파])
 
         # ── [4순위] 팩터 중복 제거: 독립 축 다양성 점수 ──────────────
@@ -414,9 +417,12 @@ def calc_signals(ticker, name, market, settings):
                           보너스4_stoch_macd, 보너스5_cci])
         총_점수    = 기본_점수 + 보너스_점수 - 주간봉_패널티
 
+        # RSI를 점수에서 제외했으므로, settings.txt의 BUY_SCORE_THRESHOLD를
+        # 그대로 사용 (기존 4 → 3 으로 1 차감해서 동등한 난이도 유지)
+        # 기존: RSI(1점 자동) + 나머지 3점 = 4점 → 신호
+        # 변경: RSI 제외 + 나머지 3점 = 3점 → 신호  (동일 기준)
         임계값_기본 = int(settings.get("BUY_SCORE_THRESHOLD", 3))
-        # RSI 조건은 이미 위에서 차단 처리됨 (조건1_rsi = True 보장)
-        임계값 = 임계값_기본
+        임계값 = max(1, 임계값_기본 - 1)  # RSI 점수 제거 보정
         매수신호 = 총_점수 >= 임계값
         # 강력매수 판단 기준
         # ① 기본 지표만으로 5점 이상 → 명확히 강력
@@ -585,19 +591,45 @@ def run_backtest(ticker, market, settings, period_months=12):
 
         RSI_BUY    = settings.get("RSI_BUY",    40)
         RSI_SELL   = settings.get("RSI_SELL",   75)
-        STOP_LOSS  = settings.get("STOP_LOSS",  -5)   # ⑤ 수정: settings.txt 기본값 -5와 통일
-        ADX_MIN       = float(settings.get("ADX_MIN", 30))  # 추세 강도 최소값
-        TRAILING_STOP = float(settings.get("TRAILING_STOP", 8))  # 고점 대비 손절 % (기본 8%)
-        threshold     = int(settings.get("BUY_SCORE_THRESHOLD", 3))
+        STOP_LOSS  = settings.get("STOP_LOSS",  -5)
+        ADX_MIN       = float(settings.get("ADX_MIN", 30))
+        TRAILING_STOP = float(settings.get("TRAILING_STOP", 8))
+        threshold     = max(1, int(settings.get("BUY_SCORE_THRESHOLD", 3)) - 1)  # RSI 점수 제거 보정
         commission = settings.get("COMMISSION", 0.001)
         slippage   = settings.get("SLIPPAGE",   0.0005)
         거래세     = 0.002 if market == "KR" else 0.0
+        # VIX 동적 거래량 임계값 — calc_signals()와 동일
+        _bt_vix = float(settings.get("CURRENT_VIX", 15.0))
+        if _bt_vix >= 30:   _bt_vol_mult = 2.0
+        elif _bt_vix >= 20: _bt_vol_mult = 1.6
+        else:               _bt_vol_mult = float(settings.get("VOL_MULT", 1.3))
 
         매수_비용 = commission + slippage
         매도_비용 = commission + slippage + 거래세
 
+        # stoch/CCI Series 사전 계산 (look-ahead 없음)
+        try:
+            _bt_h = df["High"].squeeze() if "High" in df.columns else None
+            _bt_l = df["Low"].squeeze()  if "Low"  in df.columns else None
+            if _bt_h is not None and _bt_l is not None:
+                _bt_low14  = _bt_l.rolling(14).min()
+                _bt_hi14   = _bt_h.rolling(14).max()
+                _bt_rng    = (_bt_hi14 - _bt_low14).replace(0, float("nan"))
+                _bt_k      = (close - _bt_low14) / _bt_rng * 100
+                _bt_d      = _bt_k.rolling(3).mean()
+                _bt_tp     = (_bt_h + _bt_l + close) / 3
+                _bt_tpmean = _bt_tp.rolling(14).mean()
+                _bt_mad    = _bt_tp.rolling(14).apply(
+                    lambda x: np.mean(np.abs(x - x.mean())), raw=True
+                ).replace(0, float("nan"))
+                _bt_cci = (_bt_tp - _bt_tpmean) / (0.015 * _bt_mad)
+            else:
+                _bt_k = _bt_d = _bt_cci = None
+        except Exception:
+            _bt_k = _bt_d = _bt_cci = None
+
         매수가        = None
-        매수_후_고점  = None  # 트레일링 스탑용 고점 추적
+        매수_후_고점  = None
         수익률_목록   = []
         최대_연속_손실 = 0
         연속_손실      = 0
@@ -610,10 +642,11 @@ def run_backtest(ticker, market, settings, period_months=12):
                 # ── 6개 기본 조건 (calc_signals와 완전 동일) ──────────
                 c1 = bool(rsi < RSI_BUY)
                 c2 = bool((현재가 > ma20.iloc[i]) and (ma20_slope.iloc[i] > 0))
+                # VIX 동적 거래량 임계값 적용
                 c3 = bool(
                     (avg_vol is not None) and
                     (not np.isnan(avg_vol.iloc[i])) and
-                    (volume.iloc[i] > avg_vol.iloc[i] * 1.3)
+                    (volume.iloc[i] > avg_vol.iloc[i] * _bt_vol_mult)
                 )
                 c4 = bool(현재가 <= bb_center.iloc[i])
                 c5 = bool((hist.iloc[i] > 0) and (hist.iloc[i - 1] <= 0) and
@@ -629,24 +662,52 @@ def run_backtest(ticker, market, settings, period_months=12):
                     adx_통과 = (i_adx is not None and i_adx >= ADX_MIN)
                     c6       = 돌파여부 and adx_통과
 
-                기본_점수 = sum([c1, c2, c3, c4, c5, c6])
+                기본_점수 = sum([c2, c3, c4, c5, c6])  # c1(RSI)는 게이트 전용, 점수 제외
 
                 # ── 보너스 점수 (calc_signals와 완전 동일) ────────────
-                # 보너스 ⑦: RSI 다이버전스 (가격↓ + RSI↑)
+                # 보너스 ⑦: RSI 다이버전스
                 rsi_다이버전스 = detect_rsi_divergence(
                     close.iloc[:i + 1], rsi_series.iloc[:i + 1], lookback=10
                 )
                 보너스_다이버전스 = bool(rsi_다이버전스 and c1)
 
-                # 보너스 ⑧: MACD 전환 + 거래량 급증 동시 발생
+                # 보너스 ⑧: MACD 전환 + 거래량 급증
                 보너스_복합강세 = bool(c5 and c3)
 
-                총_점수 = 기본_점수 + sum([보너스_다이버전스, 보너스_복합강세])
-
-                # 52주 신고가 보너스 (백테스트 일관성)
+                # 보너스 ⑨: 52주 신고가 근접
                 고점_52주 = close.iloc[max(0, i-252):i+1].max()
                 보너스3   = bool(현재가 >= 고점_52주 * 0.95)
-                총_점수   += int(보너스3)
+
+                # 보너스 ⑩: MACD + 스토캐스틱 골든크로스 동시
+                _bt_b4 = False
+                try:
+                    if _bt_k is not None and _bt_d is not None and i < len(_bt_k):
+                        _bk = float(_bt_k.iloc[i]) if not pd.isna(_bt_k.iloc[i]) else 50.0
+                        _bd = float(_bt_d.iloc[i]) if not pd.isna(_bt_d.iloc[i]) else 50.0
+                        _bt_b4 = bool(c5 and (_bk > _bd) and (_bk < 40))
+                except Exception:
+                    pass
+
+                # 보너스 ⑪: CCI < -100 극단 과매도
+                _bt_b5 = False
+                try:
+                    if _bt_cci is not None and i < len(_bt_cci):
+                        _bcci = float(_bt_cci.iloc[i]) if not pd.isna(_bt_cci.iloc[i]) else 0.0
+                        _bt_b5 = bool(c1 and _bcci < -100)
+                except Exception:
+                    pass
+
+                # 보너스 ⑫: 독립 팩터 축 다양성
+                _bt_추세  = bool(c2 or c6)
+                _bt_모멘텀 = bool(c5)
+                _bt_회귀  = bool(c1 or c4)
+                _bt_수급  = bool(c3)
+                _bt_b0 = bool(sum([_bt_추세, _bt_모멘텀, _bt_회귀, _bt_수급]) >= 3)
+
+                총_점수 = 기본_점수 + sum([
+                    _bt_b0, 보너스_다이버전스, 보너스_복합강세,
+                    보너스3, _bt_b4, _bt_b5
+                ])
 
                 if 총_점수 >= threshold:
                     매수가        = 현재가 * (1 + 매수_비용)
@@ -830,23 +891,55 @@ def _run_backtest_on_df(df, market, settings):
         RSI_SELL      = float(settings.get("RSI_SELL",   75))
         STOP_LOSS     = float(settings.get("STOP_LOSS",  -5))
         TRAILING_STOP = float(settings.get("TRAILING_STOP", 8))
-        ADX_MIN       = float(settings.get("ADX_MIN", 30))  # ② 추가
-        threshold     = int(settings.get("BUY_SCORE_THRESHOLD", 3))  # ② 수정: run_backtest와 동일하게 3
+        ADX_MIN       = float(settings.get("ADX_MIN", 30))
+        threshold     = max(1, int(settings.get("BUY_SCORE_THRESHOLD", 3)) - 1)  # RSI 점수 제거 보정
         commission    = settings.get("COMMISSION",  0.001)
         slippage      = settings.get("SLIPPAGE",    0.0005)
         거래세        = 0.002 if market == "KR" else 0.0
+        # VIX 동적 거래량 임계값 — calc_signals()와 동일하게 맞춤
+        _current_vix  = float(settings.get("CURRENT_VIX", 15.0))
+        if _current_vix >= 30:   _vol_mult = 2.0
+        elif _current_vix >= 20: _vol_mult = 1.6
+        else:                    _vol_mult = float(settings.get("VOL_MULT", 1.3))
 
         매수_비용 = commission + slippage
         매도_비용 = commission + slippage + 거래세
         매수가 = None; 매수_후_고점 = None; rets = []
+
+        # stoch/CCI용 Series 사전 계산 (look-ahead 없음)
+        try:
+            from indicators import calc_stochastic as _calc_stoch, calc_cci as _calc_cci
+            # 스토캐스틱: 전체 구간 rolling 계산 후 시점별 참조
+            _h = df["High"].squeeze() if "High" in df.columns else None
+            _l = df["Low"].squeeze()  if "Low"  in df.columns else None
+            if _h is not None and _l is not None:
+                _lowest  = _l.rolling(14).min()
+                _highest = _h.rolling(14).max()
+                _rng     = (_highest - _lowest).replace(0, float("nan"))
+                _k_series = (close - _lowest) / _rng * 100
+                _d_series = _k_series.rolling(3).mean()
+            else:
+                _k_series = _d_series = None
+            # CCI: 전체 구간 rolling 계산
+            if _h is not None and _l is not None:
+                _tp      = (_h + _l + close) / 3
+                _tp_mean = _tp.rolling(14).mean()
+                _mad     = _tp.rolling(14).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True)
+                _mad     = _mad.replace(0, float("nan"))
+                _cci_series = (_tp - _tp_mean) / (0.015 * _mad)
+            else:
+                _cci_series = None
+        except Exception:
+            _k_series = _d_series = _cci_series = None
 
         for i in range(20, len(close)):
             현재가 = close.iloc[i]; rsi = rsi_series.iloc[i]
             if 매수가 is None:
                 c1 = rsi < RSI_BUY
                 c2 = (현재가 > ma20.iloc[i]) and (ma20_slope.iloc[i] > 0)
+                # VIX 동적 거래량 임계값 적용
                 c3 = (avg_vol is not None and not np.isnan(avg_vol.iloc[i])
-                      and volume.iloc[i] > avg_vol.iloc[i] * 1.3)
+                      and volume.iloc[i] > avg_vol.iloc[i] * _vol_mult)
                 c4 = 현재가 <= bb_center.iloc[i]
                 c5 = (hist.iloc[i] > 0 and hist.iloc[i-1] <= 0
                       and macd_line.iloc[i] > sig_line.iloc[i])
@@ -854,18 +947,39 @@ def _run_backtest_on_df(df, market, settings):
                 if open_ is not None and high is not None and low is not None and i >= 1:
                     기준 = open_.iloc[i] + (high.iloc[i-1] - low.iloc[i-1]) * 0.5
                     돌파 = 현재가 > 기준
-                    # ② ADX 조건 포함 (run_backtest와 동일 전략)
                     i_adx = float(adx_s.iloc[i]) if (adx_s is not None and not pd.isna(adx_s.iloc[i])) else None
                     c6 = 돌파 and (i_adx is not None and i_adx >= ADX_MIN)
 
-                기본_점수 = sum([c1,c2,c3,c4,c5,c6])
+                기본_점수 = sum([c2,c3,c4,c5,c6])  # c1(RSI)는 게이트 전용, 점수 제외
 
-                # ② 보너스 포함 (run_backtest와 동일 전략)
+                # 팩터 독립 축 다양성 (calc_signals와 동일)
+                _추세축    = bool(c2 or c6)
+                _모멘텀축  = bool(c5)
+                _회귀축    = bool(c1 or c4)
+                _수급축    = bool(c3)
+                _축개수    = sum([_추세축, _모멘텀축, _회귀축, _수급축])
+                b0 = bool(_축개수 >= 3)  # 독립 축 3개 이상 → +1
+
+                # 보너스 b1~b3: 기존과 동일
                 b1 = bool(detect_rsi_divergence(close.iloc[:i+1], rsi_series.iloc[:i+1], 10) and c1)
                 b2 = bool(c5 and c3)
                 고점_52 = close.iloc[max(0,i-252):i+1].max()
                 b3 = bool(현재가 >= 고점_52 * 0.95)
-                총_점수 = 기본_점수 + sum([b1, b2, b3])
+
+                # 보너스 b4: MACD + 스토캐스틱 골든크로스 동시 (calc_signals와 동일)
+                b4 = False
+                if _k_series is not None and _d_series is not None and i < len(_k_series):
+                    _k = float(_k_series.iloc[i]) if not pd.isna(_k_series.iloc[i]) else 50.0
+                    _d = float(_d_series.iloc[i]) if not pd.isna(_d_series.iloc[i]) else 50.0
+                    b4 = bool(c5 and (_k > _d) and (_k < 40))
+
+                # 보너스 b5: CCI < -100 극단 과매도 (calc_signals와 동일)
+                b5 = False
+                if _cci_series is not None and i < len(_cci_series):
+                    _cci = float(_cci_series.iloc[i]) if not pd.isna(_cci_series.iloc[i]) else 0.0
+                    b5 = bool(c1 and _cci < -100)
+
+                총_점수 = 기본_점수 + sum([b0, b1, b2, b3, b4, b5])
 
                 if 총_점수 >= threshold:
                     매수가 = 현재가 * (1 + 매수_비용)

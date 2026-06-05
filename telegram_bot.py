@@ -83,14 +83,20 @@ def send_telegram(message):
     # 텔레그램은 글자 제한이 있어 분할 전송
     # 수정: 4000자 단순 슬라이스 → 줄바꿈 기준으로 분할 (문장 중간 잘림 방지)
     def _split_by_lines(text: str, limit: int = 4000) -> list[str]:
-        """줄바꿈 경계에서 분할 — AI 코멘트 등이 문장 중간에 끊기지 않도록"""
+        """줄바꿈 경계에서 분할 + Markdown *bold* 태그 경계 보호.
+
+        청크가 *굵게* 태그 안에서 잘리면 다음 청크에서 렌더링이 깨진다.
+        각 청크의 열린 * 개수가 홀수(닫히지 않은 bold)이면
+        청크 끝에 * 를 닫고 다음 청크 앞에 * 를 열어서 연속성을 보장한다.
+        """
         if len(text) <= limit:
             return [text]
+
         parts = []
         lines = text.split("\n")
         current = ""
         for line in lines:
-            # 한 줄 자체가 limit을 초과하면 강제 슬라이스 (극단적 케이스)
+            # 한 줄 자체가 limit을 초과하면 강제 슬라이스
             if len(line) > limit:
                 if current:
                     parts.append(current)
@@ -107,7 +113,25 @@ def send_telegram(message):
                 current = candidate
         if current:
             parts.append(current)
-        return parts
+
+        # Markdown bold(*) 태그 경계 보호
+        # 이스케이프되지 않은 * 개수가 홀수 = bold가 열린 채로 청크 종료
+        fixed = []
+        bold_open = False
+        for chunk in parts:
+            if bold_open:
+                chunk = "*" + chunk  # 이전 청크에서 열린 bold 이어받기
+            unescaped_stars = sum(
+                1 for i, c in enumerate(chunk)
+                if c == "*" and (i == 0 or chunk[i - 1] != "\\")
+            )
+            if unescaped_stars % 2 == 1:
+                chunk = chunk + "*"  # 열린 bold 닫기
+                bold_open = True
+            else:
+                bold_open = False
+            fixed.append(chunk)
+        return fixed
 
     chunks = _split_by_lines(safe_message, limit=4000)
     

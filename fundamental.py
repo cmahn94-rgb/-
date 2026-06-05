@@ -73,18 +73,23 @@ def _fetch_quote_summary(ticker: str) -> dict:
     야후 파이낸스 .info()가 막혔을 때 우회 통로다.
     yfinance가 이미 받아둔 crumb(인증 토큰)을 빌려서
     직접 API를 호출하므로 새로운 인증 과정이 없어 빠르고 안정적이다.
+
+    [버전 보호]
+    YfData는 yfinance 내부 클래스 (공개 API 아님).
+    업그레이드 시 클래스명·메서드명이 바뀔 수 있으므로
+    3단계 폴백으로 보호한다:
+      1) YfData().get_raw_json (현재 yfinance 0.2.x)
+      2) YfData()._data.get  (일부 버전 대안)
+      3) requests 직접 호출 (yfinance 완전 독립)
     """
-    try:
-        import yfinance as yf
-        from yfinance.data import YfData
-        yfdata = YfData()
-        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
-        params = {
-            "modules": "financialData,defaultKeyStatistics,summaryDetail,assetProfile",
-            "corsDomain": "finance.yahoo.com",
-            "formatted": "false",
-        }
-        result = yfdata.get_raw_json(url, params=params)
+    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+    params = {
+        "modules": "financialData,defaultKeyStatistics,summaryDetail,assetProfile",
+        "corsDomain": "finance.yahoo.com",
+        "formatted": "false",
+    }
+
+    def _parse_result(result):
         if not result:
             return {}
         data = result.get("quoteSummary", {}).get("result", [{}])
@@ -95,8 +100,37 @@ def _fetch_quote_summary(ticker: str) -> dict:
             if isinstance(module, dict):
                 merged.update(module)
         return {k: v for k, v in merged.items() if v is not None}
+
+    # 1단계: YfData().get_raw_json (기존 방식)
+    try:
+        from yfinance.data import YfData
+        yfdata = YfData()
+        if hasattr(yfdata, "get_raw_json"):
+            result = yfdata.get_raw_json(url, params=params)
+            parsed = _parse_result(result)
+            if parsed:
+                return parsed
     except Exception:
-        return {}
+        pass
+
+    # 2단계: requests 직접 호출 — yfinance 내부 구조 변경과 무관하게 동작
+    try:
+        import requests as _req
+        import yfinance as _yf
+        # yfinance가 캐시한 쿠키/헤더를 최대한 재활용
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+        }
+        resp = _req.get(url, params=params, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            parsed = _parse_result(resp.json())
+            if parsed:
+                return parsed
+    except Exception:
+        pass
+
+    return {}
 
 
 def _get_yf_info(ticker: str) -> dict:
