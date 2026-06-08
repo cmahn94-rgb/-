@@ -1,0 +1,41 @@
+name: Check API Keys
+
+# 이 워크플로는 API 키가 제대로 등록·작동하는지만 점검한다.
+# 기존 run_analysis.yml은 전혀 건드리지 않는다.
+#
+# [사용법]
+#   GitHub 레포 → Actions 탭 → 왼쪽에서 "Check API Keys" 선택
+#   → 오른쪽 "Run workflow" 버튼 클릭 → 잠시 후 로그 확인
+#
+# 키 값은 절대 출력되지 않는다 (앞 4자리만 마스킹 표시).
+
+on:
+  workflow_dispatch:   # 수동 실행 전용 (자동 스케줄 없음)
+
+jobs:
+  check-keys:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Run key diagnostics
+        env:
+          TELEGRAM_TOKEN:       ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+          GROQ_API_KEY:         ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY:       ${{ secrets.GEMINI_API_KEY }}
+          DART_API_KEY:         ${{ secrets.DART_API_KEY }}
+          GH_PAGES_URL:         ${{ secrets.GH_PAGES_URL }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+          GNEWS_API_KEY:        ${{ secrets.GNEWS_API_KEY }}
+          NEWSAPI_KEY:          ${{ secrets.NEWSAPI_KEY }}
+        run: python check_keys.py
