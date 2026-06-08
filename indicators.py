@@ -294,3 +294,69 @@ def calc_cci(df, period=14):
         return round(val, 2) if not pd.isna(val) else 0.0
     except Exception:
         return 0.0
+
+
+def calc_relative_strength(close, bench_close, period: int = 60) -> dict:
+    """
+    상대강도(Relative Strength) — 종목이 시장(벤치마크) 대비 강한지 측정.
+
+    [중학생 설명]
+    주가가 10% 올랐어도 시장 전체가 15% 올랐다면 사실 '진 것'이다.
+    반대로 5%만 올랐는데 시장은 -5%였다면 '시장을 이긴 강한 종목'이다.
+    상대강도는 "시장이 끌어올린 착시"를 빼고 이 종목만의 진짜 힘을 본다.
+
+    윌리엄 오닐(CANSLIM)의 핵심 팩터로, 시장 대비 강한 종목이
+    상승장에서 더 오르고 하락장에서 덜 빠지는 경향이 있다.
+
+    계산: 종목의 N일 수익률 - 벤치마크의 N일 수익률
+      양수(+) = 시장보다 강함 (아웃퍼폼)
+      음수(-) = 시장보다 약함 (언더퍼폼)
+
+    Args:
+        close:       종목 종가 시리즈
+        bench_close: 벤치마크(지수) 종가 시리즈 (KR=KOSPI, US=S&P500)
+        period:      비교 기간(거래일). 기본 60일(약 3개월)
+
+    반환 dict:
+        {
+          "rs_초과수익": float | None,  # 종목수익률 - 시장수익률 (%p)
+          "종목_수익률": float | None,  # 종목 N일 수익률 (%)
+          "시장_수익률": float | None,  # 벤치마크 N일 수익률 (%)
+          "아웃퍼폼":    bool,          # 시장을 이겼는지
+          "강한_아웃퍼폼": bool,         # +10%p 이상 초과 (강한 주도주)
+        }
+    """
+    빈_결과 = {
+        "rs_초과수익": None, "종목_수익률": None, "시장_수익률": None,
+        "아웃퍼폼": False, "강한_아웃퍼폼": False,
+    }
+    try:
+        if close is None or bench_close is None:
+            return 빈_결과
+        if len(close) < period + 1 or len(bench_close) < period + 1:
+            # 데이터 부족 시 가능한 짧은 기간으로 축소
+            period = min(len(close), len(bench_close)) - 1
+            if period < 20:
+                return 빈_결과
+
+        종목_과거 = float(close.iloc[-period - 1])
+        종목_현재 = float(close.iloc[-1])
+        시장_과거 = float(bench_close.iloc[-period - 1])
+        시장_현재 = float(bench_close.iloc[-1])
+
+        if 종목_과거 <= 0 or 시장_과거 <= 0:
+            return 빈_결과
+
+        종목_수익률 = (종목_현재 / 종목_과거 - 1) * 100
+        시장_수익률 = (시장_현재 / 시장_과거 - 1) * 100
+        초과수익     = 종목_수익률 - 시장_수익률
+
+        return {
+            "rs_초과수익":   round(초과수익, 2),
+            "종목_수익률":   round(종목_수익률, 2),
+            "시장_수익률":   round(시장_수익률, 2),
+            "아웃퍼폼":      bool(초과수익 > 0),
+            "강한_아웃퍼폼": bool(초과수익 >= 9.99),  # 부동소수점 경계 보정 (사실상 10%p)
+        }
+    except Exception:
+        return 빈_결과

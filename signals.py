@@ -1,27 +1,35 @@
 """
 signals.py — 매수/매도 신호 계산 · 백테스트 · Walk-Forward 검증 · 포지션 사이징
 =================================================================================
-[전략 개요 v5.1]
+[전략 개요 v5.8]
 
-■ 핵심 흐름: RSI 차단 → 기술지표 점수 → 팩터 축 다양성 → 백테스트 검증 → 신호 발생
+■ 핵심 흐름: RSI 차단 → 기술지표 점수 → 5팩터 축 다양성 → 백테스트 검증 → 신호 발생
+
+■ 공용 헬퍼 (calc_signals / run_backtest / _run_backtest_on_df 공통 로직)
+   - get_volume_threshold(): VIX별 거래량 급증 배수 (1.3/1.6/2.0)
+   - is_near_52w_high():     52주 신고가 95% 근접 판단 (look-ahead 방지)
+   - precompute_stoch_cci(): 스토캐스틱·CCI Series 사전계산
+   → 세 함수의 전략이 항상 동일하도록 보장하는 단일 출처(DRY)
 
 ■ 전제 조건 (이것부터 통과해야 점수 계산 진행)
    RSI < RSI_BUY (기본 40): 미충족 시 즉시 차단 (조기 반환)
    → RSI 40 이상은 과매도가 아닌 단순 하락 중. 과열 구간 매수 신호 방지.
 
-■ 기본 점수 조건 (각 1점, 최대 6점)
-   ① RSI < RSI_BUY(40)     : 과매도 확인 (전제 통과 후 재확인)
-   ② 현재가 > MA20 + 기울기↑: 단기 추세 상승 중
-   ③ 거래량 > 평균 * 기준배수 : 평소보다 관심 급증 (국면별 기준 조정)
-   ④ 현재가 <= 볼린저 중심선 : 통계적 저평가 구간
-   ⑤ MACD 히스토그램 음→양  : 하락 에너지 → 상승 에너지 전환
-   ⑥ 변동성 돌파 + ADX≥ADX_MIN: 강한 추세와 함께 기준선 돌파
+■ 기본 점수 조건 (각 1점, 최대 5점)
+   ① RSI < RSI_BUY(40)     : 게이트 전용 — 점수에 미포함. 미충족 시 즉시 차단.
+                              RSI는 ④볼린저와 같은 "평균회귀축"이라 중복 카운트 방지.
+   ② 현재가 > MA20 + 기울기↑: 단기 추세 상승 중 (+1점)
+   ③ 거래량 > 평균 * 기준배수 : 평소보다 관심 급증 / VIX별 동적 조정 (+1점)
+   ④ 현재가 <= 볼린저 중심선 : 통계적 저평가 구간 (+1점)
+   ⑤ MACD 히스토그램 음→양  : 하락 에너지 → 상승 에너지 전환 (+1점)
+   ⑥ 변동성 돌파 + ADX≥ADX_MIN: 강한 추세와 함께 기준선 돌파 (+1점)
 
 ■ 4개 독립 팩터 축 (중복 제거)
    추세축    : ②(MA20) OR ⑥(변동성돌파)   → 가격 방향
    모멘텀축  : ⑤(MACD)                    → 추세 전환 속도
-   평균회귀축: ①(RSI) OR ④(볼린저)        → 저평가 수준
+   평균회귀축: ①(RSI) OR ④(볼린저)        → 저평가 수준 (RSI는 항상 True — 게이트 통과)
    수급축    : ③(거래량)                   → 참여자 관심
+   → 2축 이상 충족 필수 (미달 시 매수신호 차단)
    → 3축 이상 동시 충족 시 보너스0 +1점 (독립 근거 다양성)
 
 ■ 보너스 점수 (각 +1점, 최대 +6점)
@@ -50,7 +58,95 @@ import pandas as pd
 
 from data_loader    import get_price_data, get_weekly_data
 from fundamental    import get_fundamentals
-from indicators   import calc_rsi, calc_bollinger_bands, calc_macd, calc_atr, calc_adx, calc_stochastic, calc_cci
+from indicators   import calc_rsi, calc_bollinger_bands, calc_macd, calc_atr, calc_adx, calc_stochastic, calc_cci, calc_relative_strength
+
+
+# ═══════════════════════════════════════════════════════════════
+# 공용 헬퍼 — calc_signals / run_backtest / _run_backtest_on_df 가
+# 똑같이 쓰던 중복 로직을 한 곳으로 모았다. (DRY 원칙)
+# 셋의 전략이 항상 동일하도록 보장하는 단일 출처(single source of truth).
+# ═══════════════════════════════════════════════════════════════
+
+def get_volume_threshold(settings: dict, vix: float | None = None) -> float:
+    """
+    VIX 수준에 따른 거래량 급증 판단 배수를 반환한다.
+
+    [중학생 설명]
+    시장이 공포(VIX 높음)일 땐 거래량이 평소보다 훨씬 더 터져야
+    '진짜 관심'으로 인정한다. 잔잔할 땐 1.3배, 불안하면 1.6배,
+    공포장이면 2.0배를 넘어야 거래량 조건 충족.
+
+    기존엔 이 if문이 calc_signals·run_backtest·_run_backtest_on_df
+    3곳에 복붙돼 있었다 → 여기 하나로 통일.
+    """
+    if vix is None:
+        vix = float(settings.get("CURRENT_VIX", 15.0))
+    if vix >= 30:
+        return 2.0
+    if vix >= 20:
+        return 1.6
+    return float(settings.get("VOL_MULT", 1.3))
+
+
+def is_near_52w_high(close, i: int | None = None, ratio: float = 0.95) -> bool:
+    """
+    현재가가 52주(252거래일) 신고가의 ratio(기본 95%) 이상인지 판단.
+
+    [중학생 설명]
+    1년 최고가 근처에 있으면 '위에 저항선이 없는' 강한 구간이다
+    (오닐 CANSLIM). look-ahead 방지를 위해 i 시점까지의 데이터만 본다.
+
+    i=None  → 전체 close의 최신 시점 기준 (calc_signals용)
+    i=정수  → close.iloc[max(0,i-252):i+1] 구간 기준 (백테스트 루프용)
+    """
+    try:
+        if i is None:
+            window = close.tail(252)
+            현재가 = float(close.iloc[-1])
+        else:
+            window = close.iloc[max(0, i - 252):i + 1]
+            현재가 = float(close.iloc[i])
+        고점 = float(window.max())
+        if 고점 <= 0:
+            return False
+        return bool(현재가 >= 고점 * ratio)
+    except Exception:
+        return False
+
+
+def precompute_stoch_cci(df, close):
+    """
+    스토캐스틱(%K,%D)·CCI를 전체 구간에 대해 미리 계산해 Series로 반환.
+    백테스트 루프에서 시점별로 참조하되 look-ahead가 없도록 한다.
+
+    기존엔 run_backtest·_run_backtest_on_df 두 곳에 동일 코드가
+    복붙돼 있었다 → 여기 하나로 통일.
+
+    반환: (k_series, d_series, cci_series) — 실패 시 (None, None, None)
+    """
+    try:
+        high = df["High"].squeeze() if "High" in df.columns else None
+        low  = df["Low"].squeeze()  if "Low"  in df.columns else None
+        if high is None or low is None:
+            return None, None, None
+
+        low14  = low.rolling(14).min()
+        high14 = high.rolling(14).max()
+        rng    = (high14 - low14).replace(0, float("nan"))
+        k = (close - low14) / rng * 100
+        d = k.rolling(3).mean()
+
+        tp     = (high + low + close) / 3
+        tpmean = tp.rolling(14).mean()
+        mad    = tp.rolling(14).apply(
+            lambda x: np.mean(np.abs(x - x.mean())), raw=True
+        ).replace(0, float("nan"))
+        cci = (tp - tpmean) / (0.015 * mad)
+        return k, d, cci
+    except Exception:
+        return None, None, None
+
+
 
 
 # ─────────────────────────────────────────
@@ -287,7 +383,7 @@ def calc_signals(ticker, name, market, settings):
 
         rsi_buy = settings.get("RSI_BUY", 40)
 
-        # ── 6개 기본 점수 조건 ────────────────────────────────
+        # ── 기본 점수 조건 (c2~c6, 5개 / c1=RSI는 게이트 전용) ──
         조건1_rsi      = bool(rsi < rsi_buy)
 
         # [치명적 결함 수정 1]
@@ -305,11 +401,13 @@ def calc_signals(ticker, name, market, settings):
                 "조건4_볼린저": False, "조건5_macd": False, "조건6_변동성돌파": False,
                 "보너스_다이버전스": False, "보너스_복합강세": False,
                 "보너스_신고가": False, "보너스_stoch": False, "보너스_cci": False,
-                "보너스_축다양성": False, "축_개수": 0,
+                "보너스_축다양성": False, "보너스_상대강도": False, "축_개수": 0,
+                "상대강도": {"rs_초과수익": None, "아웃퍼폼": False, "강한_아웃퍼폼": False,
+                          "종목_수익률": None, "시장_수익률": None},
                 "주간봉_패널티": 0,
                 "fa": {"fa_보너스": 0, "fa_패널티": 0, "fa_표시": "",
                        "valuation": {}, "analyst": {}, "earnings": {},
-                       "quality": {}, "fcf": {}},
+                       "quality": {}, "fcf": {}, "surprise": {}},
                 "실적_임박": False,
                 "수급": {"보너스": 0, "표시문구": "", "데이터_없음": True,
                          "외국인_연속": 0, "기관_연속": 0, "동시순매수": False},
@@ -320,11 +418,7 @@ def calc_signals(ticker, name, market, settings):
         # 거래량 임계값: VIX에 따라 동적 조정
         # VIX는 run_analysis()에서 1회 조회 후 settings["CURRENT_VIX"]에 주입
         # → 103개 종목마다 개별 다운로드하지 않아 API 호출 횟수 대폭 감소
-        현재_vix = float(settings.get("CURRENT_VIX", 15.0))
-
-        if 현재_vix >= 30:    vol_기준 = 2.0
-        elif 현재_vix >= 20:  vol_기준 = 1.6
-        else:                  vol_기준 = float(settings.get("VOL_MULT", 1.3))
+        vol_기준 = get_volume_threshold(settings)
 
         조건3_거래량   = bool(오늘_거래량 > 평균_거래량 * vol_기준)
         조건4_볼린저   = bool(현재가 <= 현재_bb_중심선)
@@ -360,7 +454,23 @@ def calc_signals(ticker, name, market, settings):
         모멘텀축 = bool(조건5_macd)
         평균회귀축 = bool(조건1_rsi or 조건4_볼린저)
         수급축   = bool(조건3_거래량)
-        축_개수  = sum([추세축, 모멘텀축, 평균회귀축, 수급축])
+
+        # ── [신규 데이터] 상대강도(RS) — 5번째 독립 축 ──────────────
+        # 종목이 시장(KOSPI/S&P500) 대비 강한지 측정. 가격 파생이지만
+        # "시장 대비" 정보라 절대 추세/모멘텀/회귀/수급과 겹치지 않는다.
+        # 시장이 끌어올린 착시를 제거한 '종목 고유의 힘'(오닐 CANSLIM 핵심).
+        if market == "US":
+            _bench = settings.get("BENCH_US_CLOSE")
+        elif market == "KR":
+            _bench = settings.get("BENCH_KR_CLOSE")
+        else:
+            _bench = None  # 크립토는 벤치마크 없음 → RS 미적용
+        rs = calc_relative_strength(close, _bench, period=60)
+        # 상대강도축: 시장을 이기는 중이면 켜짐 (독립 근거 1개로 카운트)
+        상대강도축 = bool(rs.get("아웃퍼폼"))
+
+        # 5개 독립 축 중 충족 개수 (RS 추가로 4 → 5축)
+        축_개수  = sum([추세축, 모멘텀축, 평균회귀축, 수급축, 상대강도축])
         # 3개 이상 독립 축 동시 충족 시 +1 (서로 다른 근거가 겹쳤다)
         보너스0_축다양성 = bool(축_개수 >= 3)
 
@@ -375,11 +485,7 @@ def calc_signals(ticker, name, market, settings):
         # ⑨ 보너스: 52주 신고가 근접 (O'Neil CANSLIM 핵심 원칙)
         # 현재가가 52주 최고가의 95% 이상 = 저항선 없는 구간 진입
         # 비유: 달리기 선수가 자기 최고 기록에 근접 → 신기록 가능성 높음
-        최고가_52주 = close.rolling(min(252, len(close))).max().iloc[-1]
-        보너스3_신고가 = bool(
-            (not np.isnan(최고가_52주)) and
-            (현재가 >= 최고가_52주 * 0.95)
-        )
+        보너스3_신고가 = is_near_52w_high(close)  # 헬퍼: 최신 시점 52주 신고가 95% 이상
 
         # ⑩ 보너스: MACD 전환 + 스토캐스틱 골든크로스 동시
         # 두 지표가 동시에 상승 전환 = 허위신호 50% 감소
@@ -412,18 +518,20 @@ def calc_signals(ticker, name, market, settings):
         except Exception:
             주간봉_패널티 = 0
 
+        # 보너스6 RS: 시장 대비 +10%p 이상 강한 아웃퍼폼 = 주도주 → +1
+        보너스6_상대강도 = bool(rs.get("강한_아웃퍼폼"))
+
         보너스_점수 = sum([보너스0_축다양성,
                           보너스1_다이버전스, 보너스2_복합강세, 보너스3_신고가,
-                          보너스4_stoch_macd, 보너스5_cci])
+                          보너스4_stoch_macd, 보너스5_cci, 보너스6_상대강도])
         총_점수    = 기본_점수 + 보너스_점수 - 주간봉_패널티
 
-        # RSI를 점수에서 제외했으므로, settings.txt의 BUY_SCORE_THRESHOLD를
-        # 그대로 사용 (기존 4 → 3 으로 1 차감해서 동등한 난이도 유지)
-        # 기존: RSI(1점 자동) + 나머지 3점 = 4점 → 신호
-        # 변경: RSI 제외 + 나머지 3점 = 3점 → 신호  (동일 기준)
+        # RSI는 게이트 전용(점수 제외). 국면 임계값(PHASE_CONFIG)이 이미
+        # 1씩 낮춰져 있으므로 그대로 사용 → 리포트 표시 = 실제 판정 일치.
         임계값_기본 = int(settings.get("BUY_SCORE_THRESHOLD", 3))
-        임계값 = max(1, 임계값_기본 - 1)  # RSI 점수 제거 보정
-        매수신호 = 총_점수 >= 임계값
+        임계값 = max(1, 임계값_기본)
+        # 매수신호: 점수 충족 + 독립 축 2개 이상 (1축짜리 약신호 차단)
+        매수신호 = bool(총_점수 >= 임계값 and 축_개수 >= 2)
         # 강력매수 판단 기준
         # ① 기본 지표만으로 5점 이상 → 명확히 강력
         # ② 총점 4점 이상 + 보너스 1개 이상 + RSI 조건(c1) 충족 → 강력
@@ -503,7 +611,9 @@ def calc_signals(ticker, name, market, settings):
             "보너스_stoch":     보너스4_stoch_macd,
             "보너스_cci":       보너스5_cci,
             "보너스_축다양성":  보너스0_축다양성,
+            "보너스_상대강도":  보너스6_상대강도,
             "축_개수":          축_개수,
+            "상대강도":         rs,
             "주간봉_패널티":   주간봉_패널티,
             # 기본적 분석
             "fa":               fa,
@@ -600,35 +710,11 @@ def run_backtest(ticker, market, settings, period_months=12):
         commission = settings.get("COMMISSION", 0.001)
         slippage   = settings.get("SLIPPAGE",   0.0005)
         거래세     = 0.002 if market == "KR" else 0.0
-        # VIX 동적 거래량 임계값 — calc_signals()와 동일
-        _bt_vix = float(settings.get("CURRENT_VIX", 15.0))
-        if _bt_vix >= 30:   _bt_vol_mult = 2.0
-        elif _bt_vix >= 20: _bt_vol_mult = 1.6
-        else:               _bt_vol_mult = float(settings.get("VOL_MULT", 1.3))
-
+        # VIX 동적 거래량 임계값 + stoch/CCI 사전계산 (헬퍼로 통일)
+        _bt_vol_mult = get_volume_threshold(settings)
         매수_비용 = commission + slippage
         매도_비용 = commission + slippage + 거래세
-
-        # stoch/CCI Series 사전 계산 (look-ahead 없음)
-        try:
-            _bt_h = df["High"].squeeze() if "High" in df.columns else None
-            _bt_l = df["Low"].squeeze()  if "Low"  in df.columns else None
-            if _bt_h is not None and _bt_l is not None:
-                _bt_low14  = _bt_l.rolling(14).min()
-                _bt_hi14   = _bt_h.rolling(14).max()
-                _bt_rng    = (_bt_hi14 - _bt_low14).replace(0, float("nan"))
-                _bt_k      = (close - _bt_low14) / _bt_rng * 100
-                _bt_d      = _bt_k.rolling(3).mean()
-                _bt_tp     = (_bt_h + _bt_l + close) / 3
-                _bt_tpmean = _bt_tp.rolling(14).mean()
-                _bt_mad    = _bt_tp.rolling(14).apply(
-                    lambda x: np.mean(np.abs(x - x.mean())), raw=True
-                ).replace(0, float("nan"))
-                _bt_cci = (_bt_tp - _bt_tpmean) / (0.015 * _bt_mad)
-            else:
-                _bt_k = _bt_d = _bt_cci = None
-        except Exception:
-            _bt_k = _bt_d = _bt_cci = None
+        _bt_k, _bt_d, _bt_cci = precompute_stoch_cci(df, close)
 
         매수가        = None
         매수_후_고점  = None
@@ -677,8 +763,7 @@ def run_backtest(ticker, market, settings, period_months=12):
                 보너스_복합강세 = bool(c5 and c3)
 
                 # 보너스 ⑨: 52주 신고가 근접
-                고점_52주 = close.iloc[max(0, i-252):i+1].max()
-                보너스3   = bool(현재가 >= 고점_52주 * 0.95)
+                보너스3   = is_near_52w_high(close, i)  # 헬퍼: i 시점 기준 52주 신고가
 
                 # 보너스 ⑩: MACD + 스토캐스틱 골든크로스 동시
                 _bt_b4 = False
@@ -898,41 +983,12 @@ def _run_backtest_on_df(df, market, settings):
         commission    = settings.get("COMMISSION",  0.001)
         slippage      = settings.get("SLIPPAGE",    0.0005)
         거래세        = 0.002 if market == "KR" else 0.0
-        # VIX 동적 거래량 임계값 — calc_signals()와 동일하게 맞춤
-        _current_vix  = float(settings.get("CURRENT_VIX", 15.0))
-        if _current_vix >= 30:   _vol_mult = 2.0
-        elif _current_vix >= 20: _vol_mult = 1.6
-        else:                    _vol_mult = float(settings.get("VOL_MULT", 1.3))
-
+        # VIX 동적 거래량 임계값 + stoch/CCI 사전계산 (헬퍼로 통일)
+        _vol_mult = get_volume_threshold(settings)
         매수_비용 = commission + slippage
         매도_비용 = commission + slippage + 거래세
         매수가 = None; 매수_후_고점 = None; rets = []
-
-        # stoch/CCI용 Series 사전 계산 (look-ahead 없음)
-        try:
-            from indicators import calc_stochastic as _calc_stoch, calc_cci as _calc_cci
-            # 스토캐스틱: 전체 구간 rolling 계산 후 시점별 참조
-            _h = df["High"].squeeze() if "High" in df.columns else None
-            _l = df["Low"].squeeze()  if "Low"  in df.columns else None
-            if _h is not None and _l is not None:
-                _lowest  = _l.rolling(14).min()
-                _highest = _h.rolling(14).max()
-                _rng     = (_highest - _lowest).replace(0, float("nan"))
-                _k_series = (close - _lowest) / _rng * 100
-                _d_series = _k_series.rolling(3).mean()
-            else:
-                _k_series = _d_series = None
-            # CCI: 전체 구간 rolling 계산
-            if _h is not None and _l is not None:
-                _tp      = (_h + _l + close) / 3
-                _tp_mean = _tp.rolling(14).mean()
-                _mad     = _tp.rolling(14).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True)
-                _mad     = _mad.replace(0, float("nan"))
-                _cci_series = (_tp - _tp_mean) / (0.015 * _mad)
-            else:
-                _cci_series = None
-        except Exception:
-            _k_series = _d_series = _cci_series = None
+        _k_series, _d_series, _cci_series = precompute_stoch_cci(df, close)
 
         for i in range(20, len(close)):
             현재가 = close.iloc[i]; rsi = rsi_series.iloc[i]
@@ -965,8 +1021,7 @@ def _run_backtest_on_df(df, market, settings):
                 # 보너스 b1~b3: 기존과 동일
                 b1 = bool(detect_rsi_divergence(close.iloc[:i+1], rsi_series.iloc[:i+1], 10) and c1)
                 b2 = bool(c5 and c3)
-                고점_52 = close.iloc[max(0,i-252):i+1].max()
-                b3 = bool(현재가 >= 고점_52 * 0.95)
+                b3 = is_near_52w_high(close, i)  # 헬퍼: i 시점 기준 52주 신고가
 
                 # 보너스 b4: MACD + 스토캐스틱 골든크로스 동시 (calc_signals와 동일)
                 b4 = False

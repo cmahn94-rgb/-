@@ -1,20 +1,32 @@
 """
-fundamental.py — 기본적 분석 보조 모듈 (v1)
-=============================================
-기술적 분석을 보조하는 5가지 기본적 분석 지표를 제공한다.
+fundamental.py — 기본적 분석 + 수급 보조 모듈 (v5.8)
+=====================================================
+기술적 분석을 보조하는 기본적 분석 + 한국 수급 + 어닝 서프라이즈를 제공한다.
 
-[5가지 기본적 분석]
+[기본적 분석 6가지]
 ① PER + PBR 저평가 필터   — 기술적 신호 + 가치 저평가 동시 확인
 ② 애널리스트 목표주가      — 전문가 consensus 대비 현재 가격 괴리율
 ③ 실적 발표일 캘린더       — 실적 직전 매수 위험 경고
 ④ ROE + 매출성장률         — 기업 품질 필터 (적자·저성장 기업 제외)
 ⑤ FCF 수익률               — 회계 조작 불가한 실질 현금 창출력
+⑥ 어닝 서프라이즈 (v5.8)   — 컨센서스 대비 실제 EPS 상회/하회 히스토리
+                              (4분기 연속 상회 +1.5점 등, PEAD 효과 포착)
+
+[한국 기관/외국인 수급 (KR 전용)]
+- 5중 폴백: pykrx → KRX직접 → 네이버 → FDR → yfinance 기관보유율
+- ⚠️ 모두 한국 서버를 호출 → GitHub Actions 해외 IP에선 차단될 수 있음
+  (완전 해결은 한국 IP self-hosted runner 필요)
 
 [데이터 소스]
-- 미국주식: yfinance .info (무료, 안정적)
-- 한국주식: yfinance .info (불안정) + DART API (무료, 키 필요)
+- 미국주식: yfinance .info / get_earnings_dates (무료, 안정적)
+- 한국주식: yfinance(불안정) + DART API(무료, 키 필요) + pykrx(수급)
   → DART_API_KEY: https://opendart.fss.or.kr (무료 가입 즉시 발급)
   → GitHub Secrets: DART_API_KEY
+
+[DART corp_code (v5.6 버그 수정)]
+- company.json은 corp_code(8자리)만 받음 → stock_code(6자리)로는 조회 불가
+- corpCode.xml(전체 상장사 zip)을 1회 받아 종목코드→corp_code 매핑 후 캐시
+- 이 수정 전까진 DART 기능(실적일·ROE 등)이 전부 무력화돼 있었음
 
 [통합 방식]
 - 보너스/패널티: signals.py calc_signals() 반환값에 포함
@@ -24,7 +36,8 @@ fundamental.py — 기본적 분석 보조 모듈 (v1)
 [한국주식 한계]
 - PER/PBR: yfinance KR 데이터 불안정 → 있으면 사용, 없으면 생략
 - 목표주가: 무료 소스 없음 → 미국주식 전용
-- ROE/매출성장: DART API로 보완 (DART_API_KEY 없으면 yfinance 시도)
+- 어닝 서프라이즈: yfinance KR EPS 데이터 빈약 → 대부분 미국주식만 작동
+- 수급: 해외 IP 차단 가능 → graceful 폴백 (없으면 점수 영향 없음)
 """
 
 from __future__ import annotations
@@ -40,6 +53,31 @@ from zoneinfo import ZoneInfo
 # ─────────────────────────────────────────
 _info_cache: dict[str, dict] = {}
 _dart_cache: dict[str, dict] = {}
+
+# ─────────────────────────────────────────
+# 공용 브라우저 헤더 — KRX/네이버는 해외 IP·봇을 차단하므로
+# 실제 Chrome 수준의 헤더를 보내 차단 가능성을 낮춘다.
+# 기존엔 동일한 User-Agent가 3곳에 복붙돼 있었다 → 상수로 통일.
+# ─────────────────────────────────────────
+_CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+_KRX_HEADERS = {
+    "User-Agent":       _CHROME_UA,
+    "Referer":          "https://data.krx.co.kr",
+    "Origin":           "https://data.krx.co.kr",
+    "Accept":           "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language":  "ko-KR,ko;q=0.9,en-US;q=0.8",
+    "X-Requested-With": "XMLHttpRequest",
+}
+_NAVER_HEADERS = {
+    "User-Agent":      _CHROME_UA,
+    "Referer":         "https://finance.naver.com",
+    "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
+}
 
 
 def _dart_get(url: str, params: dict, timeout: int = 10) -> dict | None:
@@ -403,8 +441,71 @@ def get_earnings_alert(ticker: str, market: str) -> dict:
     }
 
 
+# 종목코드(6자리) → DART corp_code(8자리) 매핑 테이블 (1회 다운로드 후 캐시)
+_dart_corp_map: dict[str, str] | None = None
+
+
+def _load_dart_corp_map() -> dict[str, str]:
+    """
+    DART corpCode.xml(전체 상장사 고유번호 목록)을 1회 다운로드해서
+    종목코드(6자리) → corp_code(8자리) 매핑 테이블을 만든다.
+
+    [중학생 설명]
+    DART의 company.json은 'corp_code(8자리 고유번호)'로만 조회된다.
+    우리가 가진 건 '종목코드(005930 같은 6자리)'라서 변환표가 필요하다.
+    corpCode.xml은 모든 상장사의 (종목코드 ↔ 고유번호) 대조표를 zip으로 준다.
+    이걸 1번만 받아서 메모리에 캐시하면 이후 모든 종목을 즉시 변환할 수 있다.
+
+    [기존 버그]
+    이전 코드는 company.json에 stock_code(종목코드)를 넘겼는데,
+    이 API는 corp_code만 받으므로 항상 빈 응답 → DART 기능 전체가 무력화됐었다.
+    """
+    global _dart_corp_map
+    if _dart_corp_map is not None:
+        return _dart_corp_map
+
+    _dart_corp_map = {}
+    dart_key = os.getenv("DART_API_KEY", "")
+    if not dart_key:
+        return _dart_corp_map
+
+    try:
+        import io, zipfile
+        import xml.etree.ElementTree as ET
+
+        resp = requests.get(
+            "https://opendart.fss.or.kr/api/corpCode.xml",
+            params={"crtfc_key": dart_key},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return _dart_corp_map
+
+        # 응답은 zip(CORPCODE.xml 1개 포함)
+        zf = zipfile.ZipFile(io.BytesIO(resp.content))
+        xml_name = zf.namelist()[0]
+        xml_data = zf.read(xml_name).decode("utf-8")
+
+        root = ET.fromstring(xml_data)
+        for item in root.iter("list"):
+            stock_code = (item.findtext("stock_code") or "").strip()
+            corp_code  = (item.findtext("corp_code") or "").strip()
+            # 상장사만 (stock_code가 빈 회사는 비상장 → 제외)
+            if stock_code and corp_code:
+                _dart_corp_map[stock_code] = corp_code
+
+        print(f"  📋 DART corp_code 매핑 로드: {len(_dart_corp_map)}개 상장사")
+    except Exception as e:
+        print(f"  ⚠️ DART corp_code 매핑 로드 실패: {e}")
+
+    return _dart_corp_map
+
+
 def _get_dart_corp_code(ticker: str) -> str | None:
-    """종목코드(6자리)로 DART 고유번호(corp_code)를 조회한다."""
+    """
+    종목코드(6자리)로 DART 고유번호(corp_code, 8자리)를 조회한다.
+    corpCode.xml 전체 매핑 테이블에서 찾는다.
+    """
     dart_key = os.getenv("DART_API_KEY", "")
     if not dart_key:
         return None
@@ -415,18 +516,10 @@ def _get_dart_corp_code(ticker: str) -> str | None:
     if cache_key in _dart_cache:
         return _dart_cache[cache_key]
 
-    try:
-        data = _dart_get(
-            "https://opendart.fss.or.kr/api/company.json",
-            params={"crtfc_key": dart_key, "stock_code": code},
-        )
-        if data:
-            corp_code = data.get("corp_code")
-            _dart_cache[cache_key] = corp_code
-            return corp_code
-    except Exception:
-        pass
-    return None
+    corp_map  = _load_dart_corp_map()
+    corp_code = corp_map.get(code)
+    _dart_cache[cache_key] = corp_code
+    return corp_code
 
 
 def _get_dart_earnings_date(ticker: str) -> str | None:
@@ -808,6 +901,144 @@ def _get_dart_fcf(ticker: str) -> tuple[float | None, float | None]:
 # 통합 함수: 5가지를 한 번에 조회
 # ─────────────────────────────────────────
 
+_earnings_surprise_cache: dict[str, dict] = {}
+
+
+def get_earnings_surprise(ticker: str, market: str) -> dict:
+    """
+    어닝 서프라이즈 히스토리를 분석한다 — 가격에 없는 독립 펀더멘털 신호.
+
+    [중학생 설명]
+    회사가 실제로 번 돈(EPS)이 전문가들이 예상한 것보다 많았나 적었나?
+    예상을 꾸준히 '이기는' 회사는 다음에도 이길 가능성이 높고,
+    주가도 어닝 발표 후 상승하는 경향이 있다(PEAD 효과: 어닝 발표 후 표류).
+
+    이건 RSI·MACD 같은 가격 지표나 PER 같은 밸류에이션과 전혀 다른,
+    "경영 실적의 질"을 보는 독립 정보다.
+
+    데이터: yfinance get_earnings_dates() (최근 4분기 안정적)
+      - EPS Estimate(예상) vs Reported EPS(실제) vs Surprise(%)
+    한국주식은 yfinance EPS 데이터가 빈약해 대부분 비어 있음 → 있으면 사용.
+
+    반환 dict:
+      {
+        "최근_서프라이즈": float | None,   # 가장 최근 분기 서프라이즈 %
+        "평균_서프라이즈": float | None,   # 최근 N분기 평균 %
+        "연속_상회":       int,            # 연속으로 예상을 이긴 분기 수
+        "꾸준한_상회":     bool,           # 최근 4분기 모두 상회
+        "보너스":          float,          # +0.5 ~ +1.5
+        "패널티":          float,          # -1.0 (최근 큰 폭 하회)
+        "표시문구":        str,
+      }
+    """
+    빈_결과 = {
+        "최근_서프라이즈": None, "평균_서프라이즈": None,
+        "연속_상회": 0, "꾸준한_상회": False,
+        "보너스": 0.0, "패널티": 0.0, "표시문구": "",
+    }
+
+    # 크립토 제외
+    if market in ("CRYPTO", "CRYPTO_KRW"):
+        return 빈_결과
+
+    if ticker in _earnings_surprise_cache:
+        return _earnings_surprise_cache[ticker]
+
+    try:
+        import yfinance as yf
+        tk = yf.Ticker(ticker)
+
+        # 과거 실적만 (미래 추정치는 Reported EPS가 NaN) → dropna로 거름
+        df = None
+        try:
+            df = tk.get_earnings_dates(limit=12)
+        except Exception:
+            df = None
+
+        if df is None or df.empty:
+            _earnings_surprise_cache[ticker] = 빈_결과
+            return 빈_결과
+
+        # 컬럼명 표준화 (yfinance 버전에 따라 약간 다름)
+        surprise_col = next(
+            (c for c in df.columns if "surprise" in c.lower()), None
+        )
+        reported_col = next(
+            (c for c in df.columns if "reported" in c.lower()), None
+        )
+        if surprise_col is None:
+            _earnings_surprise_cache[ticker] = 빈_결과
+            return 빈_결과
+
+        # 실제 발표된 분기만 (Reported EPS가 있는 행)
+        if reported_col is not None:
+            df = df[df[reported_col].notna()]
+        df = df[df[surprise_col].notna()]
+        if df.empty:
+            _earnings_surprise_cache[ticker] = 빈_결과
+            return 빈_결과
+
+        # 최신순 정렬 (인덱스가 날짜)
+        df = df.sort_index(ascending=False)
+        surprises = [float(x) for x in df[surprise_col].tolist()[:4]]  # 최근 4분기
+        if not surprises:
+            _earnings_surprise_cache[ticker] = 빈_결과
+            return 빈_결과
+
+        최근_서프라이즈 = surprises[0]
+        평균_서프라이즈 = sum(surprises) / len(surprises)
+
+        # 연속 상회 일수 (최신부터 양수가 몇 번 이어지나)
+        연속_상회 = 0
+        for s in surprises:
+            if s > 0:
+                연속_상회 += 1
+            else:
+                break
+        꾸준한_상회 = bool(len(surprises) >= 4 and all(s > 0 for s in surprises))
+
+        # ── 점수화 ──────────────────────────────────────────
+        보너스 = 0.0
+        패널티 = 0.0
+        if 꾸준한_상회:
+            보너스 = 1.5            # 4분기 연속 예상 상회 = 매우 강한 실적주
+        elif 연속_상회 >= 2:
+            보너스 = 1.0            # 2분기 이상 연속 상회
+        elif 최근_서프라이즈 > 5:
+            보너스 = 0.5            # 최근 분기 5% 이상 깜짝 상회
+        # 최근 분기 10% 이상 하회 = 실적 악화 경고
+        if 최근_서프라이즈 < -10:
+            패널티 = -1.0
+
+        # 표시문구
+        if 꾸준한_상회:
+            표시 = f"실적: 4분기 연속 예상상회 (최근 {최근_서프라이즈:+.1f}%)"
+        elif 연속_상회 >= 2:
+            표시 = f"실적: {연속_상회}분기 연속 상회 (최근 {최근_서프라이즈:+.1f}%)"
+        elif 최근_서프라이즈 < -10:
+            표시 = f"실적: 예상 대비 {최근_서프라이즈:.1f}% 하회 ⚠️"
+        elif abs(최근_서프라이즈) > 0.1:
+            표시 = f"실적: 최근 서프라이즈 {최근_서프라이즈:+.1f}%"
+        else:
+            표시 = ""
+
+        결과 = {
+            "최근_서프라이즈": round(최근_서프라이즈, 1),
+            "평균_서프라이즈": round(평균_서프라이즈, 1),
+            "연속_상회": 연속_상회,
+            "꾸준한_상회": 꾸준한_상회,
+            "보너스": 보너스,
+            "패널티": 패널티,
+            "표시문구": 표시,
+        }
+        _earnings_surprise_cache[ticker] = 결과
+        return 결과
+
+    except Exception:
+        _earnings_surprise_cache[ticker] = 빈_결과
+        return 빈_결과
+
+
 def get_fundamentals(ticker: str, name: str, market: str,
                      현재가: float) -> dict:
     """
@@ -840,6 +1071,9 @@ def get_fundamentals(ticker: str, name: str, market: str,
                           "적자_패널티": False, "표시문구": ""},
             "fcf":       {"fcf_수익률": None, "fcf_보너스": False,
                           "fcf_패널티": False, "표시문구": ""},
+            "surprise":  {"최근_서프라이즈": None, "평균_서프라이즈": None,
+                          "연속_상회": 0, "꾸준한_상회": False,
+                          "보너스": 0.0, "패널티": 0.0, "표시문구": ""},
             "fa_보너스": 0, "fa_패널티": 0, "fa_표시": "",
         }
 
@@ -852,6 +1086,7 @@ def get_fundamentals(ticker: str, name: str, market: str,
     earnings  = get_earnings_alert(ticker, market)
     quality   = get_quality_metrics(ticker, market)
     fcf       = get_fcf_yield(ticker, market)
+    surprise  = get_earnings_surprise(ticker, market)  # 어닝 서프라이즈(독립 펀더멘털)
 
     # 보너스 합산
     fa_보너스 = sum([
@@ -860,6 +1095,7 @@ def get_fundamentals(ticker: str, name: str, market: str,
         analyst["점수보너스"],
         1.0 if quality["품질_보너스"]   else 0,
         1.0 if fcf["fcf_보너스"]        else 0,
+        surprise["보너스"],              # 어닝 서프라이즈 +0.5~+1.5
     ])
 
     # 패널티 합산
@@ -868,6 +1104,7 @@ def get_fundamentals(ticker: str, name: str, market: str,
         earnings["점수패널티"],          # 실적 임박 시 -5.0
         -1.0 if quality["적자_패널티"]  else 0,
         -1.0 if fcf["fcf_패널티"]       else 0,
+        surprise["패널티"],              # 최근 큰 폭 하회 시 -1.0
     ])
 
     # 알림 표시 줄 생성
@@ -876,6 +1113,7 @@ def get_fundamentals(ticker: str, name: str, market: str,
     if quality["표시문구"]:    표시_parts.append(quality["표시문구"])
     if fcf["표시문구"]:        표시_parts.append(fcf["표시문구"])
     if analyst["표시문구"]:    표시_parts.append(analyst["표시문구"])
+    if surprise["표시문구"]:   표시_parts.append(surprise["표시문구"])
     if earnings["표시문구"]:   표시_parts.append(earnings["표시문구"])
 
     fa_표시 = " | ".join(표시_parts) if 표시_parts else ""
@@ -886,6 +1124,7 @@ def get_fundamentals(ticker: str, name: str, market: str,
         "earnings":  earnings,
         "quality":   quality,
         "fcf":       fcf,
+        "surprise":  surprise,
         "fa_보너스": fa_보너스,
         "fa_패널티": fa_패널티,
         "fa_표시":   fa_표시,
@@ -936,19 +1175,7 @@ def _get_isin(ticker_ks: str) -> str | None:
             "searchText": code,
             "typeNo": "0",
         }
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Referer":    "https://data.krx.co.kr",
-            "Origin":     "https://data.krx.co.kr",
-            "Accept":     "application/json, text/javascript, */*; q=0.01",
-            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-        r = requests.post(url, data=params, headers=headers, timeout=10)
+        r = requests.post(url, data=params, headers=_KRX_HEADERS, timeout=10)
         if r.status_code != 200:
             return None
         data = r.json()
@@ -961,6 +1188,59 @@ def _get_isin(ticker_ks: str) -> str | None:
     except Exception:
         pass
     return None
+
+
+def _fetch_pykrx_supply_demand(ticker_ks: str, days: int = 10) -> pd.DataFrame | None:
+    """
+    pykrx 라이브러리로 투자자별 순매수 데이터를 가져온다. (수급 1순위)
+
+    [중학생 설명]
+    pykrx는 KRX(한국거래소) 데이터를 가져오는 검증된 라이브러리다.
+    우리가 직접 KRX 비공식 API를 긁는 것보다 헤더·세션·OTP 처리가
+    정교해서 성공률이 높다.
+
+    [한계]
+    pykrx도 결국 data.krx.co.kr를 호출하므로 GitHub Actions 해외 IP가
+    차단되면 실패할 수 있다. 그래서 실패 시 기존 KRX 직접호출 →
+    네이버 → FDR → yfinance 순으로 폴백이 이어진다.
+
+    get_market_trading_value_by_date():
+      날짜별 투자자별 거래대금(기관/외국인/개인 순매수)을 반환.
+    """
+    try:
+        from pykrx import stock as _pykrx_stock
+    except ImportError:
+        return None  # pykrx 미설치 → 다음 폴백으로
+
+    try:
+        code = ticker_ks.replace(".KS", "").replace(".KQ", "").strip().zfill(6)
+        today = datetime.now(ZoneInfo("Asia/Seoul"))
+        # 주말·공휴일 고려해 넉넉히 20일 전부터 조회
+        start = (today - timedelta(days=20)).strftime("%Y%m%d")
+        end   = today.strftime("%Y%m%d")
+
+        # 투자자별 순매수 거래대금 (단위: 원)
+        df = _pykrx_stock.get_market_trading_value_by_date(start, end, code)
+        if df is None or df.empty:
+            return None
+
+        # pykrx 컬럼: 기관합계 / 기타법인 / 개인 / 외국인합계 / 전체
+        col_inst = next((c for c in df.columns if "기관" in c), None)
+        col_frgn = next((c for c in df.columns if "외국인" in c), None)
+        col_indi = next((c for c in df.columns if "개인" in c), None)
+        if col_frgn is None:
+            return None
+
+        out = pd.DataFrame()
+        out["날짜"]            = df.index
+        out["외국인_순매수"]   = df[col_frgn].values
+        out["기관합계_순매수"] = df[col_inst].values if col_inst else 0
+        out["개인_순매수"]     = df[col_indi].values if col_indi else 0
+        out["외국인_보유율"]   = 0.0  # pykrx 거래대금엔 보유율 없음 (방향성만 사용)
+        out = out.dropna(subset=["날짜"]).sort_values("날짜").tail(days)
+        return out if len(out) >= 3 else None
+    except Exception:
+        return None
 
 
 def _fetch_krx_supply_demand(ticker_ks: str, days: int = 10) -> pd.DataFrame | None:
@@ -990,19 +1270,7 @@ def _fetch_krx_supply_demand(ticker_ks: str, days: int = 10) -> pd.DataFrame | N
             "money":      "1",
             "csvxls_isNo": "false",
         }
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Referer":          "https://data.krx.co.kr",
-            "Origin":           "https://data.krx.co.kr",
-            "Content-Type":     "application/x-www-form-urlencoded",
-            "Accept":           "application/json, text/javascript, */*; q=0.01",
-            "Accept-Language":  "ko-KR,ko;q=0.9,en-US;q=0.8",
-            "X-Requested-With": "XMLHttpRequest",
-        }
+        headers = {**_KRX_HEADERS, "Content-Type": "application/x-www-form-urlencoded"}
         # 재시도: KRX는 첫 요청이 실패해도 한 번 더 시도하면 성공하는 경우 있음
         r = None
         for _attempt in range(2):
@@ -1060,16 +1328,7 @@ def _fetch_naver_supply_demand(ticker_ks: str) -> pd.DataFrame | None:
     try:
         code = ticker_ks.replace(".KS", "").replace(".KQ", "").strip()
         url = f"https://finance.naver.com/item/frgn.naver?code={code}"
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Referer":         "https://finance.naver.com",
-            "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
-        }
+        headers = _NAVER_HEADERS
         # 네이버도 한 번 재시도
         r = None
         for _attempt in range(2):
@@ -1223,8 +1482,10 @@ def get_kr_supply_demand(ticker: str) -> dict:
     if ticker in _supply_demand_cache:
         return _supply_demand_cache[ticker]
 
-    # 데이터 수집: KRX → 네이버 → FDR → yfinance 기관보유율 4중 폴백
-    df = _fetch_krx_supply_demand(ticker, days=10)
+    # 데이터 수집: pykrx → KRX직접 → 네이버 → FDR → yfinance 5중 폴백
+    df = _fetch_pykrx_supply_demand(ticker, days=10)
+    if df is None:
+        df = _fetch_krx_supply_demand(ticker, days=10)
     if df is None:
         df = _fetch_naver_supply_demand(ticker)
     if df is None:

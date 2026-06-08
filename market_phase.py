@@ -38,11 +38,14 @@ class Phase(Enum):
 
 
 PHASE_CONFIG = {
-    Phase.STRONG_BULL: {"score_threshold": 2, "description": "강한 상승장 — 모멘텀 전략, 임계값 완화"},
-    Phase.MILD_BULL:   {"score_threshold": 3, "description": "완만한 상승 — 추세추종 + 눌림목"},
-    Phase.SIDEWAYS:    {"score_threshold": 4, "description": "횡보 박스권 — 과매도 반등 위주"},
-    Phase.CORRECTION:  {"score_threshold": 5, "description": "조정·하락 — 비중 축소, 반등 신호만"},
-    Phase.PANIC:       {"score_threshold": 6, "description": "급락 패닉 — 현금 확대, 극단 과매도만"},
+    # [중요] RSI는 게이트 전용(점수 제외) → 기본점수 최대 5점(기존 6점).
+    # 국면별 임계값을 1씩 낮춰 동일한 선별력 유지.
+    # 리포트 표시 임계값 = signals.py 실제 판정 임계값 (불일치 없음).
+    Phase.STRONG_BULL: {"score_threshold": 1, "description": "강한 상승장 — 모멘텀 전략, 임계값 완화"},
+    Phase.MILD_BULL:   {"score_threshold": 2, "description": "완만한 상승 — 추세추종 + 눌림목"},
+    Phase.SIDEWAYS:    {"score_threshold": 3, "description": "횡보 박스권 — 과매도 반등 위주"},
+    Phase.CORRECTION:  {"score_threshold": 4, "description": "조정·하락 — 비중 축소, 반등 신호만"},
+    Phase.PANIC:       {"score_threshold": 5, "description": "급락 패닉 — 현금 확대, 극단 과매도만"},
 }
 
 

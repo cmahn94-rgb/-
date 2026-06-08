@@ -1,11 +1,16 @@
-yfinance>=0.2.54
-curl_cffi
-pandas
-numpy
-python-dotenv
-requests
-schedule
-anthropic
-feedparser
-beautifulsoup4
-finance-datareader
+# ── 핵심 데이터/연산 ──
+yfinance>=0.2.54        # 주가 데이터 (curl_cffi 내장으로 401 우회)
+curl_cffi               # yfinance 세션 (브라우저 임퍼소네이션)
+pandas                  # 데이터프레임 연산
+numpy                   # 수치 계산
+
+# ── 한국 수급 데이터 ──
+pykrx                   # KRX 기관/외국인 수급 (수급 1순위)
+finance-datareader      # 수급 폴백 + 보조 데이터
+
+# ── 웹 요청/파싱 ──
+requests                # API 호출 (Groq/Gemini/DART/KRX/네이버/텔레그램)
+beautifulsoup4          # 네이버금융 HTML 파싱
+
+# ── 설정 ──
+python-dotenv           # .env 로컬 환경변수 로드
