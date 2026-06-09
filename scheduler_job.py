@@ -1002,16 +1002,46 @@ def run_analysis(include_crypto=True, include_markets=None):
     print("  ✅ 주간봉 다운로드 완료")
 
     # ── VIX 1회 조회 → settings에 주입 (중복 다운로드 방지) ────
-    # 기존: calc_signals()가 103개 종목마다 ^VIX를 개별 다운로드
-    # 개선: 여기서 1회만 조회 후 settings["CURRENT_VIX"]에 저장
+    # [v5.9 수정] ^VIX가 GitHub Actions IP에서 차단되는 문제 발견 (로그: "possibly delisted")
+    # ^VIX는 폐지된 것이 아니라 yfinance 인덱스 API 엔드포인트가 GitHub IP에서 막힌 것.
+    # FRED(미국 연방준비은행) 공개 API를 폴백으로 추가 → IP 차단 없음, 키 불필요.
+    # 조회 순서: yfinance ^VIX → FRED VIXCLS → 기본값 15.0
+    settings["CURRENT_VIX"] = 15.0  # 기본값 (모두 실패 시)
+
+    # 1순위: yfinance ^VIX (캐시에 있으면 빠름)
     try:
         _vix_df = get_price_data("^VIX", period="5d")
-        settings["CURRENT_VIX"] = float(
-            _vix_df["Close"].squeeze().iloc[-1]
-        ) if _vix_df is not None and len(_vix_df) > 0 else 15.0
+        if _vix_df is not None and len(_vix_df) > 0:
+            _vix_val = float(_vix_df["Close"].squeeze().iloc[-1])
+            if _vix_val > 0:
+                settings["CURRENT_VIX"] = _vix_val
     except Exception:
-        settings["CURRENT_VIX"] = 15.0
-    print(f"  💹 VIX: {settings['CURRENT_VIX']:.1f}")
+        pass
+
+    # 2순위: FRED VIXCLS API (IP 차단 없음, 키 불필요, 일별 데이터)
+    if settings["CURRENT_VIX"] == 15.0:
+        try:
+            from datetime import datetime as _dt, timedelta as _td
+            import requests as _req
+            _fred_url = "https://api.stlouisfed.org/fred/series/observations"
+            _fred_r = _req.get(_fred_url, params={
+                "series_id":        "VIXCLS",
+                "api_key":          "anonymous",
+                "file_type":        "json",
+                "observation_start": (_dt.now() - _td(days=7)).strftime("%Y-%m-%d"),
+                "sort_order":        "desc",
+                "limit":             5,
+            }, timeout=10)
+            if _fred_r.status_code == 200:
+                _obs = [o for o in _fred_r.json().get("observations", [])
+                        if o.get("value", ".") != "."]
+                if _obs:
+                    settings["CURRENT_VIX"] = float(_obs[0]["value"])
+        except Exception:
+            pass
+
+    _vix_src = "yfinance" if settings["CURRENT_VIX"] != 15.0 else "기본값"
+    print(f"  💹 VIX: {settings['CURRENT_VIX']:.1f} ({_vix_src})")
 
     # ── 벤치마크 지수 1회 조회 → settings에 주입 (상대강도 RS 계산용) ──
     # VIX와 동일한 패턴: 103종목마다 지수를 개별 다운로드하지 않고

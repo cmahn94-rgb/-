@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from zoneinfo import ZoneInfo
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -65,16 +65,20 @@ class PhaseResult:
     us_phase: Phase | None = None
 
 
-def detect_market_phase(market: str = "KR") -> PhaseResult:
+def detect_market_phase(market: str = "KR", current_vix: float | None = None) -> PhaseResult:
     """
     현재 시장 국면을 감지하고 적절한 매수 임계값을 반환한다.
 
     [개선 내용]
     - KR 실행: KOSPI(^KS11) 기준 국면 감지
     - US 실행 (23:30): S&P500 기준 국면도 함께 감지 → 더 엄격한 쪽 적용
-    - VIX: ^VKOSPI 불안정 → ^VIX(미국) 사용 (글로벌 공포 지수)
-    - API 호출 통합: 중복 다운로드 제거 (5~6회 → 3회)
+    - VIX: scheduler_job이 미리 주입한 current_vix를 우선 사용.
+           없으면 ^VIX 직접 다운로드 시도 (period="5d" 캐시 활용).
+           ^VIX도 실패하면 0으로 처리.
 
+    Args:
+        current_vix: scheduler_job이 bulk_download 후 주입한 VIX 값.
+                     None이면 자체 다운로드 시도.
     반환값: PhaseResult (국면 + 임계값 + 세부 지표)
     """
     from indicators import calc_rsi as _calc_rsi
@@ -88,15 +92,43 @@ def detect_market_phase(market: str = "KR") -> PhaseResult:
     us_phase = None
 
     try:
-        # ── 1) 공통: VIX + S&P500 — bulk_download 캐시 활용 ─────
-        # ④ 수정: yf.download 직접 호출 → get_price_data (캐시 재사용)
-        # scheduler_job.py의 bulk_download로 이미 캐시에 적재됨
-        vix_df = _get_price("^VIX",  period="3mo")
+        # ── 1) 공통: VIX + S&P500 ──────────────────────────────────
         sp_df  = _get_price("^GSPC", period="1y")
 
-        if vix_df is not None and len(vix_df) > 0:
-            vix_close = vix_df["Close"].squeeze()
-            vix = float(vix_close.iloc[-1]) if not pd.isna(vix_close.iloc[-1]) else 0.0
+        # VIX: scheduler_job이 bulk_download 후 미리 주입한 값을 우선 사용.
+        # 기존 문제: period="3mo"는 bulk_download 캐시에 없어서 매번 재다운로드
+        # → yfinance에서 ^VIX가 가끔 실패 → VIX=0으로 국면 판단 오작동
+        # 수정: 주입된 값을 그대로 쓰고, 없으면 period="5d"(캐시 있음)로 폴백
+        if current_vix is not None and current_vix > 0:
+            vix = float(current_vix)
+            vix_df = None
+        else:
+            # 1순위: yfinance ^VIX
+            vix_df = _get_price("^VIX", period="5d")
+            if vix_df is not None and len(vix_df) > 0:
+                vix_close = vix_df["Close"].squeeze()
+                vix = float(vix_close.iloc[-1]) if not pd.isna(vix_close.iloc[-1]) else 0.0
+            else:
+                vix_df = None
+            # 2순위: FRED VIXCLS (^VIX 차단 시 폴백)
+            if vix == 0.0:
+                try:
+                    import requests as _r
+                    _fr = _r.get(
+                        "https://api.stlouisfed.org/fred/series/observations",
+                        params={"series_id": "VIXCLS", "api_key": "anonymous",
+                                "file_type": "json", "sort_order": "desc", "limit": 5,
+                                "observation_start": (datetime.now(ZoneInfo("UTC")) -
+                                    timedelta(days=7)).strftime("%Y-%m-%d")},
+                        timeout=8,
+                    )
+                    if _fr.status_code == 200:
+                        _obs = [o for o in _fr.json().get("observations", [])
+                                if o.get("value", ".") != "."]
+                        if _obs:
+                            vix = float(_obs[0]["value"])
+                except Exception:
+                    pass
 
         # ── 2) KR 기준 국면 ──────────────────────────────────────
         ks_df = _get_price("^KS11", period="1y")
