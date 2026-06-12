@@ -17,14 +17,19 @@ data_loader.py — 주가 데이터 및 뉴스 수집 (업그레이드 v3)
         → 환경변수: ALPHAVANTAGE_API_KEY
   소스 3 (Gemini grounding 검색)
         → "왜 오늘 급등/급락했나"를 Gemini에게 직접 물어봄
-        → 변동률 ±2% 이상인 날만 호출 (API 절약)
+        → 변동률 ±4.5% 이상인 날만 호출 (API 절약)
         → 환경변수: GEMINI_API_KEY (이미 있음)
 
 ■ 등락 관련 뉴스 필터링
-  - 변동률 ±2% 이상인 날만 뉴스를 적극 수집 (평범한 날은 생략)
+  - 변동률 ±4.5% 이상인 날만 뉴스를 적극 수집 (평범한 날은 생략)
   - 이벤트 키워드(어닝/FDA/계약/소송 등) 감지 → 우선 표시
   - 감성 분류 강화: 단순 키워드 → 가중치 점수제로 변경
   - 뉴스 제목만이 아니라 summary까지 보고 분류
+
+[VIX 폴백 — v5.9 추가]
+  get_vix_from_fred(): yfinance ^VIX가 GitHub Actions 해외 IP에서 차단될 때
+  FRED(미국 연준) 공개 API로 VIX를 가져온다. IP 차단 없음, 키 불필요.
+  scheduler_job·market_phase가 공유한다 (DRY).
 
 [API 키 설정 방법 — GitHub Secrets에 추가]
   ALPHAVANTAGE_API_KEY: https://www.alphavantage.co/support/#api-key
@@ -158,6 +163,46 @@ def _fetch_upbit_ohlcv(market_code: str, count: int = 365) -> pd.DataFrame | Non
         "candle_acc_trade_volume": "Volume",
     })[["Open", "High", "Low", "Close", "Volume"]]
     return df
+
+
+def get_vix_from_fred() -> float | None:
+    """
+    FRED(미국 연방준비은행) 공개 API로 최신 VIX 종가를 가져온다.
+
+    [중학생 설명]
+    yfinance의 ^VIX는 GitHub Actions 해외 IP에서 자주 차단된다
+    (로그에 "possibly delisted"로 찍힘 — 실제 폐지가 아니라 IP 차단).
+    FRED는 미국 정부 공개 데이터라 IP 차단이 없고 API 키도 불필요해서
+    ^VIX 폴백으로 안성맞춤이다.
+
+    series_id "VIXCLS" = CBOE 변동성지수 일별 종가.
+    최근 7일 중 가장 최신 유효값을 반환. 실패 시 None.
+
+    scheduler_job(VIX 1회 주입)과 market_phase(국면 판단) 양쪽에서
+    동일하게 쓰던 코드를 여기 하나로 모았다 (DRY).
+    """
+    try:
+        from datetime import datetime as _dt, timedelta as _td
+        r = requests.get(
+            "https://api.stlouisfed.org/fred/series/observations",
+            params={
+                "series_id":         "VIXCLS",
+                "api_key":           "anonymous",
+                "file_type":         "json",
+                "sort_order":        "desc",
+                "limit":             5,
+                "observation_start": (_dt.utcnow() - _td(days=7)).strftime("%Y-%m-%d"),
+            },
+            timeout=10,
+        )
+        if r.status_code == 200:
+            obs = [o for o in r.json().get("observations", [])
+                   if o.get("value", ".") != "."]
+            if obs:
+                return float(obs[0]["value"])
+    except Exception:
+        pass
+    return None
 
 
 def get_upbit_price(ticker: str, period: str = "1y") -> pd.DataFrame | None:
@@ -447,7 +492,7 @@ def _get_news_alphavantage(ticker: str) -> list[dict]:
 
 # ─────────────────────────────────────────
 # 뉴스 소스 3: Gemini Grounding 검색
-# (변동률 ±2% 이상인 날, 급등/급락 이유 직접 검색)
+# (변동률 ±4.5% 이상인 날, 급등/급락 이유 직접 검색)
 # ─────────────────────────────────────────
 
 def _get_news_gemini_grounding(ticker: str, name: str, 변동률: float) -> list[dict]:
@@ -455,14 +500,14 @@ def _get_news_gemini_grounding(ticker: str, name: str, 변동률: float) -> list
     Gemini의 Google Search Grounding 기능으로 급등/급락 이유를 검색한다.
 
     [중학생 설명]
-    변동률이 ±2% 이상인 날에는 Gemini에게 직접 물어본다:
+    변동률이 ±4.5% 이상인 날에는 Gemini에게 직접 물어본다:
     "오늘 삼성전자가 왜 3% 올랐어?"
     Gemini는 Google 검색을 실시간으로 해서 답변을 만들어준다.
     이게 가장 "등락에 직접 연관된 뉴스"를 가져오는 방법이다.
 
-    변동률 ±2% 미만인 날은 호출하지 않는다 (API 절약).
+    변동률 ±4.5% 미만인 날은 호출하지 않는다 (API 절약).
     """
-    if abs(변동률) < 2.0:
+    if abs(변동률) < 4.5:   # [v5.9] ±2% → ±4.5%: Gemini 호출 빈도 축소 (한도 절약)
         return []  # 소폭 등락은 Gemini 검색 불필요
 
     api_key = os.getenv("GEMINI_API_KEY", "")
@@ -773,7 +818,7 @@ def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
     3중 소스 폴백으로 뉴스를 수집한다.
 
     [수집 우선순위 — 5중 폴백]
-    1) Gemini Grounding → 변동률 ±2% 이상인 날, 급등/급락 이유 실시간 검색
+    1) Gemini Grounding → 변동률 ±4.5% 이상인 날, 급등/급락 이유 실시간 검색
     2) Alpha Vantage   → 미국주식 전용, 감성 점수 포함 (25회/일)
     3) GNews           → 한국주식 포함 전종목, Google News 기반 (100회/일)
     4) NewsAPI         → GNews 한도 초과 시 폴백 (100회/일)
@@ -787,9 +832,9 @@ def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
     raw_items: list[dict] = []
 
     # ── 소스 1: Gemini Grounding (급등/급락 원인 직접 검색) ──
-    # 변동률 ±2% 이상인 날만 Gemini Grounding 시도
+    # 변동률 ±4.5% 이상인 날만 Gemini Grounding 시도
     # ±1%는 일상적 노이즈 수준 — Gemini 호출 낭비 + 429 위험 증가
-    if abs(변동률) >= 2.0:
+    if abs(변동률) >= 4.5:   # [v5.9] ±2% → ±4.5% (위 _get_news_gemini_grounding과 동일 기준 유지)
         gemini_news = _get_news_gemini_grounding(ticker, name, 변동률)
         raw_items.extend(gemini_news)
 
@@ -905,7 +950,7 @@ def get_news_summary(ticker: str, 현재가: float, 전일_종가: float, name: 
     뉴스 요약(한 줄) 최대 3개와 당일 변동률을 반환한다.
 
     [업그레이드 내용]
-    - 변동률을 먼저 계산해서 뉴스 수집 전략 결정 (±2% 기준)
+    - 변동률을 먼저 계산해서 뉴스 수집 전략 결정 (±4.5% 기준)
     - 3중 소스 폴백 (Gemini Grounding > Alpha Vantage > yfinance)
     - 이벤트 키워드 기반 중요 뉴스 우선 정렬
     - 뉴스 출처 표시 (어디서 가져왔는지)

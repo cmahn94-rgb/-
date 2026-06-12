@@ -251,8 +251,20 @@ def _update_index(
     entries = [(f, t, p) for f, t, p in entries if f != 새_파일명]
     entries.insert(0, (새_파일명, 새_시각, 새_phase))
 
-    # MAX_INDEX_ENTRIES 초과분 제거
+    # MAX_INDEX_ENTRIES 초과분 제거 (인덱스 목록에서)
+    제거_대상 = entries[MAX_INDEX_ENTRIES:]   # 잘려나가는 오래된 항목
     entries = entries[:MAX_INDEX_ENTRIES]
+
+    # [v5.9] 오래된 HTML 파일을 디스크에서도 삭제 (docs 폴더 무한 증가 방지)
+    # 기존엔 인덱스 목록만 잘랐고 파일은 계속 쌓였음 → 레포 비대화/Pages 배포 지연
+    for 옛파일, _, _ in 제거_대상:
+        try:
+            옛경로 = os.path.join(DOCS_DIR, 옛파일)
+            if os.path.exists(옛경로):
+                os.remove(옛경로)
+                print(f"  🗑️  오래된 리포트 삭제: {옛파일}")
+        except Exception:
+            pass
 
     # 신호 개수 파싱 (요약용)
     buy_count  = 리포트_텍스트.count("📈 매수 신호") + 리포트_텍스트.count("🔥 강력 매수")

@@ -46,7 +46,7 @@ from config        import load_settings
 from stocks_loader import load_stocks, load_portfolio
 from signals       import get_market_regime, calc_signals, calc_sell_signal, run_backtest, run_backtest_walkforward, calc_position_size
 from market_phase  import detect_market_phase
-from data_loader   import get_price_data, get_news_summary, clear_cache, bulk_download, bulk_download_weekly, get_today_open, _warmup_yfinance_crumb
+from data_loader   import get_price_data, get_news_summary, clear_cache, bulk_download, bulk_download_weekly, get_today_open, _warmup_yfinance_crumb, get_vix_from_fred
 from portfolio     import check_portfolio_alerts, check_max_holding_days, generate_weekly_report
 from telegram_bot  import send_telegram
 from ai_analyst    import (
@@ -1018,29 +1018,16 @@ def run_analysis(include_crypto=True, include_markets=None):
     except Exception:
         pass
 
-    # 2순위: FRED VIXCLS API (IP 차단 없음, 키 불필요, 일별 데이터)
+    # 2순위: FRED VIXCLS API (IP 차단 없음, 키 불필요) — data_loader 헬퍼 재사용
+    _vix_src = "yfinance"
     if settings["CURRENT_VIX"] == 15.0:
-        try:
-            from datetime import datetime as _dt, timedelta as _td
-            import requests as _req
-            _fred_url = "https://api.stlouisfed.org/fred/series/observations"
-            _fred_r = _req.get(_fred_url, params={
-                "series_id":        "VIXCLS",
-                "api_key":          "anonymous",
-                "file_type":        "json",
-                "observation_start": (_dt.now() - _td(days=7)).strftime("%Y-%m-%d"),
-                "sort_order":        "desc",
-                "limit":             5,
-            }, timeout=10)
-            if _fred_r.status_code == 200:
-                _obs = [o for o in _fred_r.json().get("observations", [])
-                        if o.get("value", ".") != "."]
-                if _obs:
-                    settings["CURRENT_VIX"] = float(_obs[0]["value"])
-        except Exception:
-            pass
+        _fred_vix = get_vix_from_fred()
+        if _fred_vix is not None and _fred_vix > 0:
+            settings["CURRENT_VIX"] = _fred_vix
+            _vix_src = "FRED"
+        else:
+            _vix_src = "기본값"
 
-    _vix_src = "yfinance" if settings["CURRENT_VIX"] != 15.0 else "기본값"
     print(f"  💹 VIX: {settings['CURRENT_VIX']:.1f} ({_vix_src})")
 
     # ── 벤치마크 지수 1회 조회 → settings에 주입 (상대강도 RS 계산용) ──
@@ -1182,6 +1169,13 @@ def run_analysis(include_crypto=True, include_markets=None):
     # portfolio_signals.txt에 오늘 신호 종목과 예상 진입가를 저장한다.
     # 나중에 실제 수익률과 비교해 시스템 신뢰도를 측정할 수 있다.
     _record_signals(신호_종목_요약)
+
+    # ── 수급 소스 진단 요약 1회 출력 (한국 flow 축 작동 여부 판별) ──
+    try:
+        from fundamental import get_supply_demand_diagnostics
+        print(get_supply_demand_diagnostics())
+    except Exception:
+        pass
 
     # ── HTML 리포트 생성 + 링크 파일 저장 ───────────────────────
     # GH_PAGES_URL이 있으면 텔레그램 전송을 workflow로 위임.

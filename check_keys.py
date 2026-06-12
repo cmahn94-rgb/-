@@ -111,10 +111,8 @@ def test_dart() -> str:
         err = str(e)
         if "timed out" in err or "ConnectTimeout" in err or "Max retries" in err:
             return (
-                "  DART      ⚠️ 연결 타임아웃 — 키는 유효하나 GitHub Actions IP가 DART 서버에 막힘
-"
-                "             (KRX·네이버와 같은 한국 서버 해외 IP 차단 문제)
-"
+                "  DART      ⚠️ 연결 타임아웃 — 키는 유효하나 GitHub Actions IP가 DART 서버에 막힘\n"
+                "             (KRX·네이버와 같은 한국 서버 해외 IP 차단 문제)\n"
                 "             → 봇 실행에는 영향 없음 (DART 없이도 FA 나머지 데이터로 계속 진행)"
             )
         return f"  DART      ⚠️ 호출 오류: {e}"

@@ -20,13 +20,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from zoneinfo import ZoneInfo
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 
 # ④ 수정: get_price_data 사용 → bulk_download 캐시 활용
-from data_loader import get_price_data as _get_price
+from data_loader import get_price_data as _get_price, get_vix_from_fred as _get_vix_fred
 
 
 class Phase(Enum):
@@ -110,25 +110,11 @@ def detect_market_phase(market: str = "KR", current_vix: float | None = None) ->
                 vix = float(vix_close.iloc[-1]) if not pd.isna(vix_close.iloc[-1]) else 0.0
             else:
                 vix_df = None
-            # 2순위: FRED VIXCLS (^VIX 차단 시 폴백)
+            # 2순위: FRED VIXCLS (^VIX 차단 시 폴백) — data_loader 헬퍼 재사용
             if vix == 0.0:
-                try:
-                    import requests as _r
-                    _fr = _r.get(
-                        "https://api.stlouisfed.org/fred/series/observations",
-                        params={"series_id": "VIXCLS", "api_key": "anonymous",
-                                "file_type": "json", "sort_order": "desc", "limit": 5,
-                                "observation_start": (datetime.now(ZoneInfo("UTC")) -
-                                    timedelta(days=7)).strftime("%Y-%m-%d")},
-                        timeout=8,
-                    )
-                    if _fr.status_code == 200:
-                        _obs = [o for o in _fr.json().get("observations", [])
-                                if o.get("value", ".") != "."]
-                        if _obs:
-                            vix = float(_obs[0]["value"])
-                except Exception:
-                    pass
+                _fred_vix = _get_vix_fred()
+                if _fred_vix is not None and _fred_vix > 0:
+                    vix = _fred_vix
 
         # ── 2) KR 기준 국면 ──────────────────────────────────────
         ks_df = _get_price("^KS11", period="1y")
@@ -374,9 +360,10 @@ def _calc_bear_score_from_data(
        기업 대출비용 상승 + 주식 밸류에이션 압박 → 선제 경고
        역사적으로 금리 급등 후 3~6개월 내 증시 조정 발생
 
-    ② 시장 공포 지수 (^PCALL → ^VVIX → ^VIX3M → VIX모멘텀 순 폴백):
-       투자자들이 하락 헤지(풋 옵션)를 얼마나 사는지를 나타냄
-       0.8 이상 = 시장 참여자 다수가 하락에 베팅 중 → 선제 경고
+    ② 시장 공포 지수 (^VVIX → ^VIX3M → VIX 5일 모멘텀 순 폴백):
+       ^VVIX(VIX의 변동성)가 95↑ 또는 5일 평균 대비 +15% = 공포 가속
+       ^VIX3M(3개월 VIX)가 25↑ = 중기 변동성 확대
+       (구 ^PCCE/^PCALL Put/Call 비율은 yfinance 미존재로 제거됨)
        MA200/VIX보다 1~2주 앞서 반응하는 선행 지표
     """
     score = 0
@@ -426,12 +413,13 @@ def _calc_bear_score_from_data(
         pass  # 금리 데이터 실패 시 무시 (yfinance 미지원 환경 대비)
 
     # ── 선행지표 ②: 시장 공포/헤지 수요 지표 ─────────────────────
-    # ^PCCE(CBOE Equity Put/Call)가 yfinance에서 상장 폐지됨 → 대체 심볼 순서대로 시도
-    # 대체 순서: ^PCALL(전체 P/C) → ^VVIX(VIX의 변동성) → VIX 급등 모멘텀
+    # ^PCCE(CBOE Equity Put/Call) 상장 폐지 + ^PCALL도 yfinance 미존재(매번 404).
+    # → Put/Call 심볼 제거. 실제 존재하는 ^VVIX(VIX의 변동성) → ^VIX3M(3개월 VIX)만 사용.
+    # 둘 다 실패하면 VIX 5일 급등 모멘텀으로 폴백.
     try:
         공포_지수_심볼 = None
         공포_df = None
-        for sym in ["^PCALL", "^VVIX", "^VIX3M"]:
+        for sym in ["^VVIX", "^VIX3M"]:
             try:
                 df_시도 = _get_price(sym, period="1mo")
                 if df_시도 is not None and len(df_시도) >= 5:
@@ -445,11 +433,9 @@ def _calc_bear_score_from_data(
             공포 = 공포_df["Close"].squeeze()
             현재값 = _safe_float(공포.iloc[-1])
             평균값 = _safe_float(공포.rolling(5).mean().iloc[-1])
-            if 공포_지수_심볼 == "^PCALL":
-                발동 = 현재값 >= 0.8 or (평균값 > 0 and 현재값 > 평균값 * 1.2)
-            elif 공포_지수_심볼 == "^VVIX":
+            if 공포_지수_심볼 == "^VVIX":
                 발동 = 현재값 >= 95 or (평균값 > 0 and 현재값 > 평균값 * 1.15)
-            else:
+            else:  # ^VIX3M
                 발동 = 현재값 >= 25
             if 발동:
                 score += 1
