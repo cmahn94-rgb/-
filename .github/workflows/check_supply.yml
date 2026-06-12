@@ -1,0 +1,32 @@
+name: Check Supply
+
+# 네이버 모바일 증권 API가 GitHub Actions 해외 IP에서
+# 외국인/기관 수급 데이터를 주는지 1회 점검한다.
+# 데스크톱 네이버·KRX·pykrx는 전부 막혔지만(naver=0 확인),
+# 모바일 경로는 다를 수 있어 별도 진단한다.
+#
+# [사용법]
+#   Actions 탭 → "Check Supply" → "Run workflow" → 로그 확인
+#
+# 키·시크릿 불필요 (공개 모바일 엔드포인트).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check-supply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Run supply diagnostics
+        run: python check_supply.py
