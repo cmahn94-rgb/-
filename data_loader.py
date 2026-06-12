@@ -887,10 +887,10 @@ def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
     [수집 우선순위 — 6중 폴백]
     1) Gemini Grounding → 변동률 ±4.5% 이상인 날, 급등/급락 이유 실시간 검색
     2) Alpha Vantage   → 미국주식 전용, 감성 점수 포함 (25회/일)
-    3) GNews           → 한국주식 포함 전종목, Google News 기반 (100회/일)
-    3.5) 구글 뉴스 RSS → 한국주식 보강, 키·한도 없음 (ENABLE_GOOGLE_RSS=true 시)
-    4) NewsAPI         → GNews 한도 초과 시 폴백 (100회/일)
-    5) yfinance        → 최후 수단 (API 불안정)
+    3) 구글 뉴스 RSS    → 한국주식 1순위, 키·한도 없음 (기본 활성, 검증 완료 v5.11)
+    4) GNews           → RSS 미충족 종목 + 보강, Google News 기반 (100회/일)
+    5) NewsAPI         → GNews 한도 초과 시 폴백 (100회/일)
+    6) yfinance        → 최후 수단 (API 불안정)
 
     결과는 제목 중복 제거 후 이벤트 키워드 순으로 정렬해서 반환한다.
     """
@@ -915,32 +915,33 @@ def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
             print(f"  📰 Alpha Vantage 뉴스: {ticker} {len(av_news)}개")
         raw_items.extend(av_news)
 
-    # ── 소스 3: GNews (한국주식 포함 전종목) ─────────────────
-    # GNews는 Google News 기반으로 한국어 뉴스를 직접 검색한다.
-    # Alpha Vantage가 지원 안 하는 한국주식 뉴스를 여기서 채운다.
+    # ── 소스 3: 구글 뉴스 RSS (한국주식 1순위, 키·한도 없음) ──
+    # check_rss.py 진단 결과 해외 IP에서 한국·미국 모두 HTTP 200 확인됨(v5.11).
+    # RSS는 무한 무료라 GNews(하루 100회)보다 먼저 써서 한도를 아낀다.
+    # 한국 종목 전용 (미국은 Alpha Vantage가 이미 커버 → 함수 내부에서 빈 리스트).
+    # ENABLE_GOOGLE_RSS=false 로 끌 수 있음 (기본 활성).
+    if len(raw_items) < 3 and os.getenv("ENABLE_GOOGLE_RSS", "true").lower() == "true":
+        rss_news = _get_news_google_rss(ticker, name)
+        if rss_news:
+            print(f"  📰 구글RSS: {ticker} {len(rss_news)}개")
+        raw_items.extend(rss_news)
+
+    # ── 소스 4: GNews (RSS가 못 채운 종목 + 미국주식 한국어) ──
+    # GNews는 하루 100회 한도라 RSS 다음 순서로 둬서 한도를 아낀다.
     if len(raw_items) < 3:
         gn_news = _get_news_gnews(ticker, name)
         if gn_news:
             print(f"  📰 GNews: {ticker} {len(gn_news)}개")
         raw_items.extend(gn_news)
 
-    # ── 소스 3.5: 구글 뉴스 RSS (한국주식 보강, 키·한도 없음) ──
-    # check_rss.py 진단에서 해외 IP 접근 가능 확인 시 ENABLE_GOOGLE_RSS=true 로 활성화.
-    # 기본은 비활성(GNews/NewsAPI가 우선). 실패해도 폴백 체인에 영향 없음.
-    if len(raw_items) < 3 and os.getenv("ENABLE_GOOGLE_RSS", "false").lower() == "true":
-        rss_news = _get_news_google_rss(ticker, name)
-        if rss_news:
-            print(f"  📰 구글RSS: {ticker} {len(rss_news)}개")
-        raw_items.extend(rss_news)
-
-    # ── 소스 4: NewsAPI (GNews 폴백) ────────────────────────
+    # ── 소스 5: NewsAPI (GNews 폴백) ────────────────────────
     if len(raw_items) < 3:
         na_news = _get_news_newsapi(ticker, name)
         if na_news:
             print(f"  📰 NewsAPI: {ticker} {len(na_news)}개")
         raw_items.extend(na_news)
 
-    # ── 소스 5: yfinance (최후 수단) ────────────────────────
+    # ── 소스 6: yfinance (최후 수단) ────────────────────────
     # yfinance는 Yahoo Finance API 불안정으로 자주 실패.
     # GNews/NewsAPI로도 못 채웠을 때만 시도한다.
     if len(raw_items) < 2:
