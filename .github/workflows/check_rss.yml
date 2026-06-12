@@ -1,0 +1,27 @@
+name: Check RSS
+
+# 구글 뉴스 RSS가 GitHub Actions 해외 IP에서 접근 가능한지 1회 점검한다.
+# 결과에 따라 RSS를 한국 뉴스 소스로 도입할지 결정한다.
+#
+# [사용법]
+#   Actions 탭 → "Check RSS" 선택 → "Run workflow" 버튼 → 로그 확인
+#
+# 키·시크릿이 전혀 필요 없다 (RSS는 공개 피드).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check-rss:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Run RSS diagnostics
+        run: python check_rss.py
