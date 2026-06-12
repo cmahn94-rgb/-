@@ -13,9 +13,10 @@ fundamental.py — 기본적 분석 + 수급 보조 모듈 (v5.8)
                               (4분기 연속 상회 +1.5점 등, PEAD 효과 포착)
 
 [한국 기관/외국인 수급 (KR 전용)]
-- 5중 폴백: pykrx → KRX직접 → 네이버 → FDR → yfinance 기관보유율
-- ⚠️ 모두 한국 서버를 호출 → GitHub Actions 해외 IP에선 차단될 수 있음
-  (완전 해결은 한국 IP self-hosted runner 필요)
+- 폴백: 네이버모바일 → (로컬)pykrx·KRX·네이버데스크톱 → FDR → yfinance 기관보유율
+- ✅ 네이버 모바일 API(m.stock.naver.com)는 해외 IP에서도 작동 (v5.12 복구)
+  → 외국인/기관 일별 순매수 수치 정상 수집. flow 축 복구 완료.
+- ⚠️ 데스크톱 네이버·KRX·pykrx는 해외 IP 차단 → 로컬(한국 IP)에서만 시도
 
 [데이터 소스]
 - 미국주식: yfinance .info / get_earnings_dates (무료, 안정적)
@@ -1157,7 +1158,7 @@ _supply_demand_cache: dict[str, dict] = {}
 
 # 수급 소스별 성공 카운터 (실행당 진단 요약용)
 _supply_demand_source_count: dict[str, int] = {
-    "pykrx": 0, "krx": 0, "naver": 0, "fdr": 0,
+    "naver_mobile": 0, "pykrx": 0, "krx": 0, "naver": 0, "fdr": 0,
     "yfinance_보유율": 0, "전체실패": 0,
 }
 # GitHub Actions(해외 IP) 감지 — pykrx/KRX직접은 해외 IP 차단으로 100% 실패하므로
@@ -1329,6 +1330,194 @@ def _fetch_krx_supply_demand(ticker_ks: str, days: int = 10) -> pd.DataFrame | N
         return None
 
 
+def _fetch_naver_mobile_supply_demand(ticker_ks: str, days: int = 10) -> pd.DataFrame | None:
+    """
+    네이버 '모바일' 증권 API로 외국인/기관 일별 순매수를 가져온다. (수급 1순위)
+
+    [중학생 설명]
+    데스크톱 네이버(finance.naver.com)·KRX·pykrx는 GitHub Actions 해외 IP에서
+    전부 차단됐다. 그런데 '모바일' 네이버(m.stock.naver.com)는 다른 경로라
+    해외 IP에서도 열려있음을 진단(check_supply.py)으로 확인했다.
+
+    엔드포인트: https://m.stock.naver.com/api/stock/{code}/trend
+    응답: 일별 [{bizdate, frgn_pure_buy_quant, organ_pure_buy_quant,
+                frgn_hold_ratio, indi_pure_buy_quant}, ...]
+    이건 뉴스 텍스트가 아니라 '외국인 순매수 수량' 같은 실제 수치라
+    수급 점수(외국인 N일 연속 +1점 등)에 바로 쓸 수 있다.
+
+    [한계]
+    네이버가 모바일 API에도 차단을 걸면 실패할 수 있다 → graceful None 반환.
+    """
+    try:
+        code = ticker_ks.replace(".KS", "").replace(".KQ", "").strip().zfill(6)
+        url = f"https://m.stock.naver.com/api/stock/{code}/trend"
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                "Version/17.0 Mobile/15E148 Safari/604.1"
+            ),
+            "Accept":          "application/json, text/plain, */*",
+            "Accept-Language": "ko-KR,ko;q=0.9",
+            "Referer":         "https://m.stock.naver.com/",
+        }
+
+        r = None
+        for _attempt in range(2):
+            try:
+                r = requests.get(url, headers=headers, timeout=12)
+                if r.status_code == 200:
+                    break
+            except Exception:
+                if _attempt == 0:
+                    time.sleep(1)
+        if r is None or r.status_code != 200:
+            return None
+
+        data = r.json()
+        # 응답은 list 또는 {"result":[...]} / {"trends":[...]} 형태
+        rows = data if isinstance(data, list) else (
+            data.get("result") or data.get("trends") or []
+        )
+        if not rows:
+            return None
+
+        def _num(v):
+            if v is None:
+                return 0
+            if isinstance(v, (int, float)):
+                return v
+            t = str(v).replace(",", "").replace("+", "").strip()
+            try:
+                return float(t) if "." in t else int(t)
+            except Exception:
+                return 0
+
+        records = []
+        for row in rows:
+            날짜 = row.get("bizdate") or row.get("localTradedAt") or row.get("date")
+            if not 날짜:
+                continue
+            records.append({
+                "날짜":           str(날짜),
+                "외국인_순매수":   _num(row.get("frgn_pure_buy_quant")
+                                       or row.get("foreignerPureBuyQuant")),
+                "기관합계_순매수": _num(row.get("organ_pure_buy_quant")
+                                       or row.get("organPureBuyQuant")),
+                "개인_순매수":     _num(row.get("indi_pure_buy_quant")
+                                       or row.get("individualPureBuyQuant")),
+                "외국인_보유율":   _num(row.get("frgn_hold_ratio")
+                                       or row.get("foreignerHoldRatio")),
+            })
+        if not records:
+            return None
+
+        df = pd.DataFrame(records)
+        df["날짜"] = pd.to_datetime(df["날짜"], format="%Y%m%d", errors="coerce")
+        # 포맷이 다르면 자동 파싱 재시도
+        if df["날짜"].isna().all():
+            df["날짜"] = pd.to_datetime(pd.DataFrame(records)["날짜"], errors="coerce")
+        df = df.dropna(subset=["날짜"]).sort_values("날짜").tail(days)
+        return df if len(df) >= 3 else None
+
+    except Exception:
+        return None
+
+
+def _fetch_naver_mobile_supply_demand(ticker_ks: str, days: int = 10) -> pd.DataFrame | None:
+    """
+    네이버 모바일 증권 API로 외국인/기관 일별 순매수를 가져온다. (수급 1순위)
+
+    [중학생 설명]
+    데스크톱 네이버(finance.naver.com)와 KRX는 GitHub Actions 해외 IP에서
+    전부 차단됐다. 그런데 '모바일' 네이버(m.stock.naver.com)는 다른 경로라
+    해외 IP에서도 열려있다 (check_supply.py 진단으로 확인, HTTP 200).
+
+    엔드포인트: https://m.stock.naver.com/api/stock/{code}/trend
+    실제 응답 예: 20260611 외국인=+549,645 기관=-5,437,840
+
+    이건 뉴스 텍스트가 아니라 '외국인 순매수 주식수' 같은 정확한 수치라
+    수급 점수 계산(외국인 연속 순매수 +1점 등)에 바로 쓸 수 있다.
+
+    반환: 표준 DataFrame (날짜/외국인_순매수/기관합계_순매수/개인_순매수/외국인_보유율)
+          실패 시 None → 다음 폴백으로
+    """
+    code = ticker_ks.replace(".KS", "").replace(".KQ", "").strip().zfill(6)
+    url = f"https://m.stock.naver.com/api/stock/{code}/trend"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+            "Version/17.0 Mobile/15E148 Safari/604.1"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ko-KR,ko;q=0.9",
+        "Referer": "https://m.stock.naver.com/",
+    }
+
+    r = None
+    for _attempt in range(2):
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                break
+        except Exception:
+            if _attempt == 0:
+                time.sleep(1)
+    if r is None or r.status_code != 200:
+        return None
+
+    try:
+        data = r.json()
+        # 응답이 list 또는 {"result":[...]} 형태
+        rows = data if isinstance(data, list) else (data.get("result") or data.get("trends") or [])
+        if not rows:
+            return None
+
+        날짜_l, 외국인_l, 기관_l, 개인_l, 보유율_l = [], [], [], [], []
+        for row in rows:
+            bizdate = row.get("bizdate") or row.get("localTradedAt") or row.get("date")
+            frgn    = row.get("frgn_pure_buy_quant")
+            organ   = row.get("organ_pure_buy_quant")
+            indi    = row.get("indi_pure_buy_quant")
+            ratio   = row.get("frgn_hold_ratio")
+            if bizdate is None or (frgn is None and organ is None):
+                continue
+            날짜_l.append(str(bizdate))
+            외국인_l.append(_to_num(frgn))
+            기관_l.append(_to_num(organ))
+            개인_l.append(_to_num(indi))
+            보유율_l.append(_to_num(ratio))
+
+        if len(날짜_l) < 3:
+            return None
+
+        out = pd.DataFrame({
+            "날짜":            날짜_l,
+            "외국인_순매수":   외국인_l,
+            "기관합계_순매수": 기관_l,
+            "개인_순매수":     개인_l,
+            "외국인_보유율":   보유율_l,
+        })
+        # 날짜 오름차순 정렬 후 최근 days일
+        out = out.sort_values("날짜").tail(days).reset_index(drop=True)
+        return out if len(out) >= 3 else None
+    except Exception:
+        return None
+
+
+def _to_num(v) -> float:
+    """문자열 숫자('+549,645' 등)를 float로 안전 변환. 실패 시 0.0"""
+    if v is None:
+        return 0.0
+    try:
+        if isinstance(v, (int, float)):
+            return float(v)
+        return float(str(v).replace(",", "").replace("+", "").strip())
+    except Exception:
+        return 0.0
+
+
 def _fetch_naver_supply_demand(ticker_ks: str) -> pd.DataFrame | None:
     """
     네이버금융 비공식 API 폴백.
@@ -1491,11 +1680,21 @@ def get_kr_supply_demand(ticker: str) -> dict:
     if ticker in _supply_demand_cache:
         return _supply_demand_cache[ticker]
 
-    # 데이터 수집: (로컬) pykrx → KRX직접 → 네이버 → FDR → yfinance
-    #             (CI)   네이버 → FDR → yfinance  ← pykrx/KRX직접은 해외IP 차단이라 스킵
+    # 데이터 수집 폴백 체인:
+    #   1순위) 네이버 모바일 API — CI(해외IP)에서도 작동 확인됨(check_supply.py)
+    #   2순위~) pykrx → KRX직접 → 네이버데스크톱 → FDR (로컬 전용, 해외IP 차단)
+    #   최후) yfinance 기관보유율 (일별 수급 없음, 방향성만)
+    # 모바일 네이버가 핵심 복구 경로라 IS_CI 분기 밖에서 최우선 시도한다.
     df = None
     성공_소스 = None
-    if not IS_CI:
+
+    # 1순위: 네이버 모바일 (해외 IP에서도 열림 — 수급 flow 축 복구)
+    df = _fetch_naver_mobile_supply_demand(ticker, days=10)
+    if df is not None:
+        성공_소스 = "naver_mobile"
+
+    # 2순위~: 로컬(한국 IP) 전용 소스 — CI에선 차단되므로 스킵
+    if df is None and not IS_CI:
         df = _fetch_pykrx_supply_demand(ticker, days=10)
         if df is not None:
             성공_소스 = "pykrx"
@@ -1503,10 +1702,12 @@ def get_kr_supply_demand(ticker: str) -> dict:
             df = _fetch_krx_supply_demand(ticker, days=10)
             if df is not None:
                 성공_소스 = "krx"
-    if df is None:
-        df = _fetch_naver_supply_demand(ticker)
-        if df is not None:
-            성공_소스 = "naver"
+        if df is None:
+            df = _fetch_naver_supply_demand(ticker)  # 데스크톱 HTML
+            if df is not None:
+                성공_소스 = "naver"
+
+    # FDR은 로컬·CI 공통 폴백 (가끔 CI에서도 통함)
     if df is None:
         df = _fetch_fdr_supply_demand(ticker)
         if df is not None:
@@ -1639,14 +1840,17 @@ def get_supply_demand_diagnostics() -> str:
     """
     c = _supply_demand_source_count
     시도 = sum(c.values())
-    확보 = c["pykrx"] + c["krx"] + c["naver"] + c["fdr"]
+    확보 = c["naver_mobile"] + c["pykrx"] + c["krx"] + c["naver"] + c["fdr"]
     env = "CI(해외IP)" if IS_CI else "로컬"
     lines = [
         "📊 ===== 수급 소스 진단 요약 =====",
         f"  환경: {env} | 시도: {시도}개 | 일별수급 확보: {확보}개",
-        f"  소스별: pykrx={c['pykrx']} / krx={c['krx']} / naver={c['naver']} / "
-        f"fdr={c['fdr']} / yfinance(보유율만)={c['yfinance_보유율']} / 전체실패={c['전체실패']}",
+        f"  소스별: naver_mobile={c['naver_mobile']} / pykrx={c['pykrx']} / "
+        f"krx={c['krx']} / naver={c['naver']} / fdr={c['fdr']} / "
+        f"yfinance(보유율만)={c['yfinance_보유율']} / 전체실패={c['전체실패']}",
     ]
     if 확보 == 0 and 시도 > 0:
         lines.append("  ⚠️ 일별 수급 0개 — flow 축이 사실상 죽음. 백테스트-실전 불일치 위험.")
+    elif c["naver_mobile"] > 0:
+        lines.append(f"  ✅ 네이버 모바일 API로 수급 복구 ({c['naver_mobile']}종목) — flow 축 정상 작동")
     return "\n".join(lines)

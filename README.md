@@ -278,13 +278,15 @@ main/
 │
 ├── 🔑 진단
 │   ├── check_keys.py        API 키 등록·작동 점검 (값 노출 없이 마스킹)
-│   └── check_rss.py         구글 뉴스 RSS 해외 IP 접근성 점검
+│   ├── check_rss.py         구글 뉴스 RSS 해외 IP 접근성 점검
+│   └── check_supply.py      네이버 모바일 수급 API 접근성 점검
 │
 └── 🤖 자동화
     └── .github/workflows/
         ├── run_analysis.yml  메인 스케줄 (하루 3회 자동 실행)
         ├── check_keys.yml    키 점검 전용 (수동 버튼)
-        └── check_rss.yml     RSS 접근성 점검 (수동 버튼)
+        ├── check_rss.yml     RSS 접근성 점검 (수동 버튼)
+        └── check_supply.yml  수급 API 접근성 점검 (수동 버튼)
 ```
 
 ---
@@ -649,13 +651,15 @@ GitHub Actions cron은 정시 보장이 없어 30분~2시간 지연이 흔합니
 
 ---
 
-**Q. 수급 데이터가 항상 "조회 실패"로 표시돼요.**
+**Q. 수급 데이터는 어디서 가져오나요?**
 
-KRX(`data.krx.co.kr`)와 네이버금융은 GitHub Actions IP(해외)를 차단하는 경우가 있습니다.  
-v5.6부터 **pykrx**를 1순위로 추가해(pykrx → KRX직접 → 네이버 → FDR → yfinance 5중 폴백) 성공률을 높였지만,  
-pykrx도 결국 KRX 서버를 호출하므로 해외 IP 차단은 완전히 못 피합니다.  
-완전한 해결은 한국 IP에서 실행(self-hosted runner)하는 방법뿐입니다.  
-수급은 "있으면 보너스, 없으면 패스"로 설계돼 있어 조회 실패 시 다른 신호에 영향을 주지 않습니다.
+v5.12부터 **네이버 모바일 API**(`m.stock.naver.com/api/stock/{종목코드}/trend`)가 1순위입니다.  
+데스크톱 네이버·KRX·pykrx는 GitHub Actions 해외 IP에서 차단되지만, **모바일 경로는 열려있음**을 진단(check_supply.py)으로 확인했습니다. 외국인/기관 일별 순매수 수치를 정상적으로 가져옵니다.
+
+폴백 순서: 네이버 모바일 → (로컬 전용) pykrx·KRX·네이버데스크톱 → FDR → yfinance 기관보유율.  
+로그의 수급 진단 요약에서 `naver_mobile=N`으로 복구 종목 수가 표시됩니다.
+
+> 네이버가 모바일 API에도 차단을 걸면 실패할 수 있으나, 그때도 graceful하게 다음 폴백으로 넘어가 다른 신호에 영향을 주지 않습니다.
 
 ---
 
@@ -794,6 +798,7 @@ SK하이닉스 (000660.KS) | ADX 32↑
 | v5.9 | **코드 리팩토링** — 중복 로직 3종(VIX 거래량·52주 신고가·stoch/cci)을 공용 헬퍼로 추출(DRY), KRX/네이버 헤더 상수화, 미사용 의존성(schedule·anthropic·feedparser) 제거, API 키 진단 도구(check_keys.py) 추가 |
 | v5.10 | **VIX 차단 대응 + 운영 안정화** — ^VIX 해외 IP 차단 시 FRED(미 연준) API 폴백 추가(get_vix_from_fred 공용 헬퍼), ^PCALL 죽은 심볼 제거, Gemini Grounding 트리거 ±2%→±4.5%(한도 절약), 텔레그램 링크 전송 --data-urlencode 적용, 수급 폴백 진단 로그(CI에서 네이버 생사 판별) |
 | v5.11 | **구글 뉴스 RSS 뉴스 소스 추가** — 한국주식 뉴스 1순위(키·한도 없는 공개 피드), 6중 폴백, 제목 중복 제거. CI 진단 결과 해외 IP에서 한국·미국 모두 HTTP 200·100개 확인 → **기본 활성**. RSS가 무한 무료라 GNews(100회/일)보다 앞 순서로 배치해 한도 절약 |
+| v5.12 | **수급 데이터 복구 (네이버 모바일 API)** — 데스크톱 네이버·KRX·pykrx가 모두 해외 IP 차단되던 수급 데이터를, 모바일 경로(m.stock.naver.com/api/stock/{code}/trend)로 복구. CI 진단(check_supply.py)에서 해외 IP HTTP 200·실제 외국인/기관 일별 순매수 확인. 수급 폴백 1순위로 통합 → flow 축 정상 작동 |
 
 ### v5.5 — RSI 게이트 전용화 및 전략 일관성
 
