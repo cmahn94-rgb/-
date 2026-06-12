@@ -813,18 +813,86 @@ def _get_news_newsapi(ticker: str, name: str) -> list[dict]:
         print(f"⚠️ NewsAPI 뉴스 오류 ({ticker}): {e}")
         return []
 
+def _get_news_google_rss(ticker: str, name: str = "") -> list[dict]:
+    """
+    구글 뉴스 RSS로 뉴스를 수집한다. (한국주식 보강용)
+
+    [중학생 설명]
+    GNews·NewsAPI는 무료 한도(하루 100회)가 있어서 종목이 많으면 금방 소진된다.
+    구글 뉴스 RSS는 키도 한도도 없는 공개 피드라, 한국 종목 뉴스가
+    부족할 때 추가로 채워준다. 표준 라이브러리(xml.etree)로 파싱해서
+    feedparser 같은 추가 패키지가 필요 없다.
+
+    [주의 — 해외 IP 차단]
+    구글이 GitHub Actions IP를 rate-limit/차단할 수 있다.
+    check_rss.py 진단에서 살아있음이 확인된 경우에만 활성화한다.
+    실패하면 빈 리스트 반환 → 기존 폴백 체인에 영향 없음.
+
+    한국 종목: 한국어 쿼리 (hl=ko, gl=KR)
+    미국 종목: Alpha Vantage가 이미 커버하므로 호출 안 함 (한국 전용)
+    """
+    import urllib.parse
+    import xml.etree.ElementTree as _ET
+
+    # 한국 종목만 대상 (.KS/.KQ). 미국은 Alpha Vantage가 커버.
+    if not (ticker.endswith(".KS") or ticker.endswith(".KQ")):
+        return []
+
+    검색어 = f"{name} 주가" if name else ticker.replace(".KS", "").replace(".KQ", "")
+    q = urllib.parse.quote(검색어)
+    url = (
+        f"https://news.google.com/rss/search?q={q}"
+        f"&hl=ko&gl=KR&ceid={urllib.parse.quote('KR:ko')}"
+    )
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+        "Accept-Language": "ko-KR,ko;q=0.9",
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return []
+        root = _ET.fromstring(resp.content)
+        result = []
+        for item in root.findall(".//item")[:5]:
+            title = (item.findtext("title") or "").strip()
+            if not title:
+                continue
+            src_el = item.find("source")
+            source = (src_el.text or "").strip() if src_el is not None else "google_rss"
+            # 구글 뉴스 제목은 "제목 - 출처" 형식 → 출처 부분 정리
+            if " - " in title:
+                title = title.rsplit(" - ", 1)[0].strip()
+            result.append({
+                "title":   title,
+                "summary": "",          # RSS는 본문 요약 없음 (제목만)
+                "source":  "google_rss",
+                "publisher": source,
+            })
+        return result
+    except Exception:
+        return []
+
+
 def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
     """
     3중 소스 폴백으로 뉴스를 수집한다.
 
-    [수집 우선순위 — 5중 폴백]
+    [수집 우선순위 — 6중 폴백]
     1) Gemini Grounding → 변동률 ±4.5% 이상인 날, 급등/급락 이유 실시간 검색
     2) Alpha Vantage   → 미국주식 전용, 감성 점수 포함 (25회/일)
     3) GNews           → 한국주식 포함 전종목, Google News 기반 (100회/일)
+    3.5) 구글 뉴스 RSS → 한국주식 보강, 키·한도 없음 (ENABLE_GOOGLE_RSS=true 시)
     4) NewsAPI         → GNews 한도 초과 시 폴백 (100회/일)
     5) yfinance        → 최후 수단 (API 불안정)
 
-    결과는 이벤트 키워드가 있는 뉴스를 앞으로 정렬해서 반환한다.
+    결과는 제목 중복 제거 후 이벤트 키워드 순으로 정렬해서 반환한다.
     """
     if _is_upbit_ticker(ticker):
         return []
@@ -856,6 +924,15 @@ def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
             print(f"  📰 GNews: {ticker} {len(gn_news)}개")
         raw_items.extend(gn_news)
 
+    # ── 소스 3.5: 구글 뉴스 RSS (한국주식 보강, 키·한도 없음) ──
+    # check_rss.py 진단에서 해외 IP 접근 가능 확인 시 ENABLE_GOOGLE_RSS=true 로 활성화.
+    # 기본은 비활성(GNews/NewsAPI가 우선). 실패해도 폴백 체인에 영향 없음.
+    if len(raw_items) < 3 and os.getenv("ENABLE_GOOGLE_RSS", "false").lower() == "true":
+        rss_news = _get_news_google_rss(ticker, name)
+        if rss_news:
+            print(f"  📰 구글RSS: {ticker} {len(rss_news)}개")
+        raw_items.extend(rss_news)
+
     # ── 소스 4: NewsAPI (GNews 폴백) ────────────────────────
     if len(raw_items) < 3:
         na_news = _get_news_newsapi(ticker, name)
@@ -872,6 +949,19 @@ def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
 
     if not raw_items:
         return []
+
+    # ── 제목 중복 제거 (RSS·GNews가 같은 기사를 줄 수 있음) ──
+    # 정규화(공백·기호 제거, 소문자)한 제목 앞 40자로 중복 판정
+    _seen = set()
+    _deduped = []
+    for it in raw_items:
+        _t = (it.get("title") or "").lower()
+        _norm = "".join(c for c in _t if c.isalnum())[:40]
+        if _norm and _norm in _seen:
+            continue
+        _seen.add(_norm)
+        _deduped.append(it)
+    raw_items = _deduped
 
     # ── 이벤트 키워드 스코어링 → 중요 뉴스 앞으로 ─────────
     def _event_score(item: dict) -> int:
