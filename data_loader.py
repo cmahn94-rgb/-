@@ -42,6 +42,7 @@ import re
 import json
 import time
 import requests
+from datetime import datetime, timedelta, timezone
 import yfinance as yf
 import pandas as pd
 from dotenv import load_dotenv
@@ -182,7 +183,6 @@ def get_vix_from_fred() -> float | None:
     동일하게 쓰던 코드를 여기 하나로 모았다 (DRY).
     """
     try:
-        from datetime import datetime as _dt, timedelta as _td
         r = requests.get(
             "https://api.stlouisfed.org/fred/series/observations",
             params={
@@ -191,7 +191,7 @@ def get_vix_from_fred() -> float | None:
                 "file_type":         "json",
                 "sort_order":        "desc",
                 "limit":             5,
-                "observation_start": (_dt.utcnow() - _td(days=7)).strftime("%Y-%m-%d"),
+                "observation_start": (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d"),
             },
             timeout=10,
         )
@@ -813,71 +813,168 @@ def _get_news_newsapi(ticker: str, name: str) -> list[dict]:
         print(f"⚠️ NewsAPI 뉴스 오류 ({ticker}): {e}")
         return []
 
-def _get_news_google_rss(ticker: str, name: str = "") -> list[dict]:
+def _parse_rss_date(date_str: str):
+    """RSS pubDate(RFC822)를 datetime으로 파싱. 실패 시 None."""
+    if not date_str:
+        return None
+    try:
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(date_str)
+    except Exception:
+        return None
+
+
+def _clean_rss_title(title: str) -> str:
+    """구글 뉴스 제목에서 ' - 출처' 꼬리를 제거."""
+    title = (title or "").strip()
+    if " - " in title:
+        title = title.rsplit(" - ", 1)[0].strip()
+    return title
+
+
+# HTML 엔티티 → 일반 문자 매핑 (RSS description 정리용)
+_HTML_ENTITIES = {
+    "&quot;": '"', "&amp;": "&", "&lt;": "<",
+    "&gt;": ">", "&#39;": "'", "&nbsp;": " ",
+}
+
+
+def _strip_html(text: str) -> str:
+    """RSS description의 HTML 태그·엔티티를 제거하고 순수 텍스트만 남긴다."""
+    if not text:
+        return ""
+    text = re.sub(r"<[^>]+>", " ", text)        # 모듈 상단 re 재사용
+    for ent, ch in _HTML_ENTITIES.items():
+        text = text.replace(ent, ch)
+    return _normalize_whitespace(text)          # 공백 정리 헬퍼 재사용
+
+
+# 구글 뉴스 RSS 요청 헤더 (브라우저로 위장 — 해외 IP 차단 완화)
+_GOOGLE_RSS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    "Accept-Language": "ko-KR,ko;q=0.9",
+}
+
+# 광고성·낚시성 제목 패턴 (품질 필터) — 이런 단어만 있고 알맹이 없는 기사 제외
+_RSS_NOISE_PATTERNS = [
+    "특징주", "이 종목", "오늘의 추천", "급등주 포착", "상한가 종목",
+    "관심주", "추천주", "유망주", "테마주 정리", "장중 특징",
+]
+
+
+def _get_news_google_rss(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
     """
-    구글 뉴스 RSS로 뉴스를 수집한다. (한국주식 보강용)
+    구글 뉴스 RSS로 뉴스를 수집한다. (한국주식 보강용 — v5.16 품질 개선)
 
     [중학생 설명]
-    GNews·NewsAPI는 무료 한도(하루 100회)가 있어서 종목이 많으면 금방 소진된다.
-    구글 뉴스 RSS는 키도 한도도 없는 공개 피드라, 한국 종목 뉴스가
-    부족할 때 추가로 채워준다. 표준 라이브러리(xml.etree)로 파싱해서
-    feedparser 같은 추가 패키지가 필요 없다.
+    구글 뉴스 RSS는 키도 한도도 없는 공개 피드다. 한국 종목 뉴스가
+    부족할 때 채워준다. v5.16에서 4가지를 개선해 품질을 높였다:
+      1. 검색어 정교화 — 평상시 "종목명", 급등락 시 "종목명 실적 OR 수주 OR 계약"
+         으로 '왜 움직였나'를 묻는 기사를 우선 수집
+      2. 본문 요약(description) 활용 — 제목만 쓰던 걸 요약까지 파싱
+      3. 발행일(pubDate) 필터 — 3일 초과 오래된 기사 제외, 최신 우선
+      4. 품질 필터 — 광고성 제목·짧은 제목 제외, 한 언론사 최대 2개
 
     [주의 — 해외 IP 차단]
-    구글이 GitHub Actions IP를 rate-limit/차단할 수 있다.
-    check_rss.py 진단에서 살아있음이 확인된 경우에만 활성화한다.
-    실패하면 빈 리스트 반환 → 기존 폴백 체인에 영향 없음.
+    구글이 GitHub Actions IP를 rate-limit할 수 있다. 검색어를 바꾸면
+    해외 IP에서 결과가 달라질 수 있으므로 check_rss.py로 재검증 권장.
+    실패 시 빈 리스트 → 폴백 체인에 영향 없음.
 
-    한국 종목: 한국어 쿼리 (hl=ko, gl=KR)
-    미국 종목: Alpha Vantage가 이미 커버하므로 호출 안 함 (한국 전용)
+    한국 종목 전용 (.KS/.KQ). 미국은 Alpha Vantage가 커버.
     """
     import urllib.parse
     import xml.etree.ElementTree as _ET
 
-    # 한국 종목만 대상 (.KS/.KQ). 미국은 Alpha Vantage가 커버.
     if not (ticker.endswith(".KS") or ticker.endswith(".KQ")):
         return []
+    if not name:
+        name = ticker.replace(".KS", "").replace(".KQ", "")
 
-    검색어 = f"{name} 주가" if name else ticker.replace(".KS", "").replace(".KQ", "")
+    # ── 1. 검색어 정교화 ──────────────────────────────────
+    # 급등락(±4.5% 이상)이면 "왜?"를 묻는 이벤트 지향 검색,
+    # 평상시엔 종목명만으로 폭넓게 (단순 '주가' 기사 편중 방지)
+    if abs(변동률) >= 4.5:
+        검색어 = f"{name} 실적 OR 수주 OR 계약 OR 공시"
+    else:
+        검색어 = name
     q = urllib.parse.quote(검색어)
     url = (
         f"https://news.google.com/rss/search?q={q}"
         f"&hl=ko&gl=KR&ceid={urllib.parse.quote('KR:ko')}"
     )
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/rss+xml, application/xml, text/xml, */*",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-    }
-
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = requests.get(url, headers=_GOOGLE_RSS_HEADERS, timeout=10)
         if resp.status_code != 200:
             return []
         root = _ET.fromstring(resp.content)
-        result = []
-        for item in root.findall(".//item")[:5]:
-            title = (item.findtext("title") or "").strip()
-            if not title:
-                continue
-            src_el = item.find("source")
-            source = (src_el.text or "").strip() if src_el is not None else "google_rss"
-            # 구글 뉴스 제목은 "제목 - 출처" 형식 → 출처 부분 정리
-            if " - " in title:
-                title = title.rsplit(" - ", 1)[0].strip()
-            result.append({
-                "title":   title,
-                "summary": "",          # RSS는 본문 요약 없음 (제목만)
-                "source":  "google_rss",
-                "publisher": source,
-            })
-        return result
     except Exception:
         return []
+
+    # ── 3. 발행일 필터 기준 (3일 이내) ────────────────────
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=3)
+
+    후보 = []
+    for item in root.findall(".//item"):
+        title = _clean_rss_title(item.findtext("title"))
+        if not title:
+            continue
+
+        # ── 4. 품질 필터 ──────────────────────────────────
+        # (a) 너무 짧은 제목 제외 (10자 미만 = 정보량 부족)
+        if len(title) < 10:
+            continue
+        # (b) 광고성·낚시성 제목 제외
+        if any(p in title for p in _RSS_NOISE_PATTERNS):
+            continue
+
+        # ── 3. 발행일 파싱 + 최신성 ───────────────────────
+        pub_dt = _parse_rss_date(item.findtext("pubDate"))
+        if pub_dt is not None and pub_dt < cutoff:
+            continue  # 3일보다 오래된 기사 제외
+
+        # ── 2. 본문 요약(description) 살리기 ──────────────
+        summary = _strip_html(item.findtext("description"))
+        # 요약이 제목과 거의 같으면 버림 (구글이 제목 반복하는 경우)
+        if summary and summary[:20] == title[:20]:
+            summary = ""
+
+        src_el = item.find("source")
+        publisher = (src_el.text or "").strip() if src_el is not None else "google_rss"
+
+        후보.append({
+            "title":     title,
+            "summary":   summary[:200],   # 너무 길면 자름
+            "source":    "google_rss",
+            "publisher": publisher,
+            "_pub":      pub_dt or now,    # 정렬용 (없으면 현재시각 취급)
+        })
+
+    if not 후보:
+        return []
+
+    # ── 3. 최신순 정렬 ────────────────────────────────────
+    후보.sort(key=lambda x: x["_pub"], reverse=True)
+
+    # ── 4. 한 언론사 최대 2개 (도배 방지) + 상위 5개 ──────
+    출처_카운트 = {}
+    result = []
+    for c in 후보:
+        pub = c["publisher"]
+        출처_카운트[pub] = 출처_카운트.get(pub, 0) + 1
+        if 출처_카운트[pub] > 2:
+            continue
+        c.pop("_pub", None)   # 내부 정렬용 필드 제거
+        result.append(c)
+        if len(result) >= 5:
+            break
+
+    return result
 
 
 def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
@@ -887,7 +984,7 @@ def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
     [수집 우선순위 — 6중 폴백]
     1) Gemini Grounding → 변동률 ±4.5% 이상인 날, 급등/급락 이유 실시간 검색
     2) Alpha Vantage   → 미국주식 전용, 감성 점수 포함 (25회/일)
-    3) 구글 뉴스 RSS    → 한국주식 1순위, 키·한도 없음 (기본 활성, 검증 완료 v5.11)
+    3) 구글 뉴스 RSS    → 한국주식 1순위, 키·한도 없음 (v5.16 품질개선: 검색어 정교화·요약·최신성·품질필터)
     4) GNews           → RSS 미충족 종목 + 보강, Google News 기반 (100회/일)
     5) NewsAPI         → GNews 한도 초과 시 폴백 (100회/일)
     6) yfinance        → 최후 수단 (API 불안정)
@@ -921,7 +1018,7 @@ def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
     # 한국 종목 전용 (미국은 Alpha Vantage가 이미 커버 → 함수 내부에서 빈 리스트).
     # ENABLE_GOOGLE_RSS=false 로 끌 수 있음 (기본 활성).
     if len(raw_items) < 3 and os.getenv("ENABLE_GOOGLE_RSS", "true").lower() == "true":
-        rss_news = _get_news_google_rss(ticker, name)
+        rss_news = _get_news_google_rss(ticker, name, 변동률)
         if rss_news:
             print(f"  📰 구글RSS: {ticker} {len(rss_news)}개")
         raw_items.extend(rss_news)
@@ -1105,10 +1202,6 @@ def get_news_summary(ticker: str, 현재가: float, 전일_종가: float, name: 
 # ─────────────────────────────────────────
 # 텍스트 처리 유틸리티 (기존 유지)
 # ─────────────────────────────────────────
-
-def _strip_html(text: str) -> str:
-    return re.sub(r"<[^>]+>", " ", text or "")
-
 
 def _to_text(value) -> str:
     if value is None:

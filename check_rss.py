@@ -74,9 +74,10 @@ if __name__ == "__main__":
 
     tests = [
         # (라벨, 검색어, hl, gl, ceid)
-        ("한국-삼성전자", "삼성전자 주가", "ko", "KR", "KR:ko"),
-        ("한국-SK하이닉스", "SK하이닉스 주가", "ko", "KR", "KR:ko"),
-        ("미국-Apple",   "Apple stock", "en-US", "US", "US:en"),
+        # v5.16 개선: 평상시 검색어(종목명만) + 급등락 시 이벤트 지향 검색어 둘 다 검증
+        ("평상시-삼성전자", "삼성전자", "ko", "KR", "KR:ko"),
+        ("이벤트-삼성전자", "삼성전자 실적 OR 수주 OR 계약 OR 공시", "ko", "KR", "KR:ko"),
+        ("평상시-SK하이닉스", "SK하이닉스", "ko", "KR", "KR:ko"),
     ]
 
     results = []
@@ -90,18 +91,19 @@ if __name__ == "__main__":
             print(f"       └ {s}")
 
     # ── 종합 판단 ──────────────────────────────────────────
-    kr_ok = any(r["ok"] for r in results if r["name"].startswith("한국"))
-    us_ok = any(r["ok"] for r in results if r["name"].startswith("미국"))
+    평상시_ok = any(r["ok"] for r in results if r["name"].startswith("평상시"))
+    이벤트_ok = any(r["ok"] for r in results if r["name"].startswith("이벤트"))
 
     print("\n" + "=" * 60)
-    print("  판단")
+    print("  판단 (v5.16 개선 검색어)")
     print("=" * 60)
-    if kr_ok and us_ok:
-        print("  ✅ 한국·미국 모두 작동 → RSS를 한국 뉴스 1순위로 채택 가능")
-    elif us_ok and not kr_ok:
-        print("  ⚠️ 미국만 작동, 한국 0개 → 한국 전용으론 부적합")
-    elif kr_ok and not us_ok:
-        print("  ⚠️ 한국만 작동 → 한국 뉴스용으로 채택, 미국은 기존 소스 유지")
+    if 평상시_ok and 이벤트_ok:
+        print("  ✅ 평상시·이벤트 검색어 모두 작동 → 개선된 RSS 그대로 사용 가능")
+    elif 평상시_ok and not 이벤트_ok:
+        print("  ⚠️ 평상시 검색어만 작동, 이벤트 검색어(OR 연산자) 차단/빈결과")
+        print("     → data_loader.py에서 이벤트 검색어를 종목명만으로 단순화 권장")
+    elif 이벤트_ok and not 평상시_ok:
+        print("  ⚠️ 이벤트 검색어만 작동 (드문 경우)")
     else:
         print("  ❌ 둘 다 차단/실패 → 수급처럼 해외 IP 차단. RSS 도입 보류 권장")
     print("=" * 60)
