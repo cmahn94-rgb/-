@@ -103,6 +103,8 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/
+          # 성과 추적·헬스 로그도 커밋해야 누적됨 (없으면 매 실행 초기화)
+          git add -f signal_log.json health_log.json 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "📋 HTML 변경사항 없음 — 커밋 건너뜀"
           else

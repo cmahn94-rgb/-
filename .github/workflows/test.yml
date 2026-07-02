@@ -1,0 +1,31 @@
+name: Tests
+
+# push·PR마다 핵심 로직 테스트를 자동 실행한다.
+# 신호·백테스트·파서·성과추적·장세 분류의 회귀를 방지한다.
+
+on:
+  push:
+    paths:
+      - '**.py'
+      - '.github/workflows/test.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pytest
+          pip install yfinance pandas numpy requests
+
+      - name: Run tests
+        run: python -m pytest tests/ -v
