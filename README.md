@@ -248,6 +248,9 @@ main/
 │   │                        + 공용 헬퍼(거래량 임계값·52주 신고가·stoch/cci)
 │   ├── momentum.py          ⚡ 모멘텀 전략: 돌파 추종 단타 (안정과 독립)
 │   ├── strategy_utils.py    두 전략 공용 유틸 (거래비용·벤치마크·통화·ATR)
+│   ├── performance_tracker.py  📈 신호 성과 추적 (기록·채점·실전 승률)
+│   ├── observability.py     🏥 관측성 (로깅·헬스체크·연속실패 감지)
+│   ├── data_quality.py      🔍 데이터 품질 게이트 (이상치·신선도 검증)
 │   ├── indicators.py        RSI·MACD·볼린저·ATR·ADX·스토캐스틱·CCI·상대강도(RS)
 │   ├── market_phase.py      시장 국면 5단계 + 선행지표 + 장세판단(듀얼전략 가중치)
 │   └── scheduler_job.py     전체 실행 흐름, 리포트 조립, 벤치마크 주입
@@ -271,7 +274,7 @@ main/
 ├── ⚙️ 설정
 │   ├── settings.txt         주요 파라미터 (RSI 기준, 손절 등)
 │   ├── stocks.txt           감시할 종목 목록
-│   ├── config.py            설정 파일 읽기
+│   ├── config.py            설정 파일 읽기 + 값 검증(validate_settings)·API키 점검
 │   └── stocks_loader.py     종목·포트폴리오 파일 읽기
 │
 ├── 📨 전송
@@ -284,8 +287,11 @@ main/
 │   └── check_supply.py      네이버 모바일 수급 API 접근성 점검
 │
 └── 🤖 자동화
+    ├── tests/
+    │   └── test_core.py      22개 회귀 방지 테스트 (pytest)
     └── .github/workflows/
         ├── run_analysis.yml  메인 스케줄 (하루 3회 자동 실행)
+        ├── test.yml          push마다 테스트 자동 실행
         ├── check_keys.yml    키 점검 전용 (수동 버튼)
         ├── check_rss.yml     RSS 접근성 점검 (수동 버튼)
         └── check_supply.yml  수급 API 접근성 점검 (수동 버튼)
@@ -628,6 +634,27 @@ UPBIT:BTC,0.01,95000000,KRW
 
 ---
 
+## 8.6 하이엔드급 신뢰성 시스템 (v5.18)
+
+봇을 "잘 만든 도구"에서 "하이엔드 시스템"으로 끌어올리는 5가지 인프라입니다.
+
+**📈 성과 추적 (performance_tracker.py)**
+신호를 낼 때마다 `signal_log.json`에 기록하고, 며칠 뒤 실제 주가로 채점합니다. "안정 전략 실전 승률 63%, 모멘텀 48%" 같은 진짜 성적표가 리포트에 표시됩니다. 백테스트(과거 시뮬레이션)와 별개로, 실전 신호의 사후 결과를 누적해 전략을 데이터로 개선하는 토대입니다.
+
+**🏥 관측성 (observability.py)**
+실행 중 각 데이터 소스의 성공/실패를 집계해 헬스 체크를 출력합니다. 특정 소스가 3일 연속 실패하면 텔레그램으로 경고합니다. 예전엔 소스가 조용히 죽어도 몰랐지만, 이제는 "수급 3건 실패" 같은 건강검진 결과가 남습니다.
+
+**🔍 데이터 품질 게이트 (data_quality.py)**
+신호 계산 전에 가격 데이터를 검사합니다. 0원·음수·비현실적 급변(±50% 초과)·거래정지(거래량 0) 데이터는 신호 계산에서 제외해, 쓰레기 데이터로 인한 잘못된 매매를 막습니다.
+
+**✅ 자동 테스트 (tests/test_core.py)**
+22개 pytest가 지표·모멘텀·장세·RSS·성과추적·품질검사를 검증합니다. `test.yml`이 push마다 자동 실행해, 리팩토링 시 기존 동작이 안 깨졌음을 보장합니다.
+
+**⚙️ 설정 검증 (config.validate_settings)**
+`settings.txt` 값을 검사해 잘못된 파라미터(음수 RSI, 양수 손절 등)를 안전한 기본값으로 교정하고, 필수 API 키 누락을 시작 단계에서 알립니다.
+
+---
+
 ## 9. 자주 묻는 질문
 
 **Q. 매수 신호가 하나도 안 나와요.**
@@ -836,6 +863,8 @@ SK하이닉스 (000660.KS) | ADX 32↑
 | v5.15 | **안정 전략 신호 표시 개선** — 안정 매수 신호가 없을 때 "🛡️ 안정 전략" 헤더를 항상 표시하고 "오류 아님 — 조건 미충족, 무리하게 진입하지 않는 것이 정상"임을 명확히 안내. 모멘텀 신호만 뜨고 안정이 비었을 때 오류로 오해하던 문제 해결 |
 | v5.16 | **구글 뉴스 RSS 품질 개선** — ①검색어 정교화(평상시 종목명 / 급등락 시 "실적 OR 수주 OR 계약 OR 공시" 이벤트 지향), ②본문 요약(description) 파싱 추가(HTML·엔티티 제거), ③발행일(pubDate) 필터(3일 초과 기사 제외, 최신순 정렬), ④품질 필터(짧은·광고성 제목 제외, 한 언론사 최대 2개). check_rss.py가 새 검색어를 재검증하도록 갱신 |
 | v5.17 | **코드 리팩토링** — RSS 관련 정리: _strip_html이 모듈 re·_normalize_whitespace 헬퍼 재사용(중복 제거), HTML 엔티티를 _HTML_ENTITIES 상수로, 구글 RSS 요청 헤더를 _GOOGLE_RSS_HEADERS 상수로 추출. 함수 내부 datetime import를 모듈 상단으로 통합(get_vix_from_fred 포함). 동작 변화 없이 구조만 정리, 안정봇 signals.py 무수정 |
+| v5.18 | **하이엔드급 5대 시스템** — ①성과추적(performance_tracker.py): 신호를 signal_log.json에 기록하고 사후 채점해 실전 승률 측정 ②관측성(observability.py): logging 전환 + 소스별 헬스 체크 + 3일 연속 실패 감지 ③테스트(tests/test_core.py): 22개 pytest로 핵심 로직 회귀 방지 + test.yml 자동실행 ④데이터품질(data_quality.py): 0원·급변·거래정지 데이터 신호 계산 제외 ⑤설정검증(config.validate_settings): 잘못된 파라미터 안전 기본값 교정 + API 키 점검. 안정봇 signals.py 무수정 |
+| v5.19 | **코드 리팩토링** — v5.18 하이엔드 통합 코드를 헬퍼로 추출: 성과 기록/채점 인라인 로직 → performance_tracker.record_and_grade(), 수급·VIX 헬스 반영 인라인 → observability.record_data_source_health(). scheduler_job.py의 run_analysis가 약 45줄 감소. 중복 import 제거. 동작 변화 없이 구조 정리, 22개 테스트 전부 통 추가로 성과 추적이 실제 누적되도록 워크플로가 signal_log.json·health_log.json을 커밋하게 수정(이 파일들이 커밋 안 되면 GitHub Actions 새 환경마다 초기화되어 성과가 안 쌓이던 이슈).과 |
 
 ### v5.5 — RSI 게이트 전용화 및 전략 일관성
 

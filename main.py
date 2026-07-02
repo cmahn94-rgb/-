@@ -20,7 +20,7 @@ import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from config import create_default_files, load_env
+from config import create_default_files, load_env, check_required_keys
 from scheduler_job import run_analysis
 
 
@@ -75,6 +75,7 @@ if __name__ == "__main__":
 
     create_default_files()
     load_env()
+    check_required_keys()   # 하이엔드: 필수 키 누락 시작 단계 점검
 
     mode = get_run_mode()
     kst_now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%H:%M KST")

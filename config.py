@@ -106,7 +106,60 @@ def load_settings():
                     settings[key.strip()] = float(val.strip())
                 except ValueError:
                     pass  # 숫자로 변환 불가한 줄은 무시
+
+    # 하이엔드: 설정값 검증 (잘못된 값이 조용히 통과하지 않게)
+    validate_settings(settings)
     return settings
+
+
+def validate_settings(settings: dict) -> list:
+    """
+    settings.txt 값의 유효성을 검사한다. (하이엔드 5순위)
+
+    [중학생 설명]
+    RSI 기준이 음수이거나, 손절이 양수(+)이거나, 목표수익률이 0이면
+    봇이 이상하게 동작한다. 이런 잘못된 값을 시작 단계에서 잡아
+    경고하고, 위험한 값은 안전한 기본값으로 되돌린다.
+
+    반환: 발견된 문제 메시지 리스트 (없으면 빈 리스트)
+    """
+    문제 = []
+
+    # ── 범위 검증 규칙: (키, 최소, 최대, 기본값, 설명) ──
+    규칙 = [
+        ("RSI_OVERSOLD",   1,   99,   30,   "RSI 과매도 기준"),
+        ("RSI_OVERBOUGHT", 1,   99,   70,   "RSI 과매수 기준"),
+        ("TARGET_1",       0.1, 200,  12,   "1차 목표수익률"),
+        ("TARGET_2",       0.1, 500,  25,   "2차 목표수익률"),
+        ("TRAILING_STOP",  0.1, 50,   8,    "트레일링 스탑"),
+        ("MAX_HOLDING_DAYS", 1, 365,  30,   "최대 보유일"),
+        ("CORRELATION_MAX", 0.1, 1.0, 0.7,  "상관계수 상한"),
+        ("MAX_POSITIONS",  1,   50,   8,    "최대 동시 보유"),
+        ("M_STOP",         -50, -0.1, -2.5, "모멘텀 손절(음수여야 함)"),
+        ("M_TARGET",       0.1, 100,  5.0,  "모멘텀 익절"),
+        ("M_VOL_MULT",     1.0, 20,   2.0,  "모멘텀 거래량 배수"),
+    ]
+
+    for 키, 최소, 최대, 기본, 설명 in 규칙:
+        if 키 not in settings:
+            continue
+        값 = settings[키]
+        if not (최소 <= 값 <= 최대):
+            문제.append(f"{키}({설명})={값} 범위 이탈 [{최소}~{최대}] → 기본값 {기본} 적용")
+            settings[키] = 기본
+
+    # ── 논리 검증: 과매도 < 과매수 ──
+    if ("RSI_OVERSOLD" in settings and "RSI_OVERBOUGHT" in settings
+            and settings["RSI_OVERSOLD"] >= settings["RSI_OVERBOUGHT"]):
+        문제.append("RSI 과매도 기준이 과매수보다 크거나 같음 → 기본값(30/70) 적용")
+        settings["RSI_OVERSOLD"] = 30
+        settings["RSI_OVERBOUGHT"] = 70
+
+    if 문제:
+        print("⚙️ 설정 검증 경고:")
+        for m in 문제:
+            print(f"   ⚠️ {m}")
+    return 문제
 
 
 def load_env():
@@ -121,3 +174,35 @@ def get_env_value(key, default=None):
     """환경변수 값을 안전하게 가져온다. 없으면 default 반환."""
     value = os.getenv(key)
     return value if value else default
+
+
+def check_required_keys() -> list:
+    """
+    봇 실행에 필요한 API 키/환경변수 존재 여부를 점검한다. (하이엔드 5순위)
+
+    [중학생 설명]
+    텔레그램 토큰이 없으면 알림을 못 보내고, 키가 하나도 없으면 뉴스가
+    안 나온다. 시작할 때 "뭐가 없는지"를 명확히 알려줘서, 나중에
+    조용히 실패하는 걸 막는다.
+
+    반환: 누락 경고 메시지 리스트
+    """
+    경고 = []
+
+    # 필수: 텔레그램 (없으면 알림 자체가 안 감)
+    if not os.getenv("TELEGRAM_TOKEN"):
+        경고.append("❌ TELEGRAM_TOKEN 없음 — 알림 전송 불가")
+    if not os.getenv("TELEGRAM_CHAT_ID"):
+        경고.append("❌ TELEGRAM_CHAT_ID 없음 — 알림 대상 불명")
+
+    # 선택: 뉴스/AI 키 (하나도 없으면 뉴스 품질 저하)
+    뉴스_키 = ["GEMINI_API_KEY", "GROQ_API_KEY", "GNEWS_API_KEY",
+             "NEWSAPI_KEY", "ALPHAVANTAGE_API_KEY"]
+    if not any(os.getenv(k) for k in 뉴스_키):
+        경고.append("⚠️ 뉴스/AI 키 없음 — RSS만으로 동작 (품질 저하 가능)")
+
+    if 경고:
+        print("🔑 API 키 점검:")
+        for m in 경고:
+            print(f"   {m}")
+    return 경고
