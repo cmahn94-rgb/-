@@ -168,8 +168,7 @@ jobs:
           MESSAGE=$(cat docs/.pending_link.txt)
           # [v5.21] 배포 지연 시 링크가 잠시 404일 수 있음을 사용자에게 안내
           if [ "${PAGE_LIVE:-true}" = "false" ]; then
-            MESSAGE="${MESSAGE}
-⏳ 페이지 배포 지연 중 — 링크가 몇 분 후에 열릴 수 있어요"
+            MESSAGE="${MESSAGE}"$'\n'"⏳ 페이지 배포 지연 중 — 링크가 몇 분 후에 열릴 수 있어요"
           fi
           HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
