@@ -142,14 +142,21 @@ jobs:
           PAGE_URL=$(grep -oE 'https?://[^ )]+\.html' docs/.pending_link.txt | head -1)
           if [ -n "$PAGE_URL" ]; then
             echo "⏳ GitHub Pages 배포 폴링: $PAGE_URL"
-            for i in $(seq 1 24); do
+            # [v5.21] 2분 → 5분: GitHub 배포가 deployment_queued에서 지연되는
+            # 사례(실로그 확인)를 커버. 그래도 안 뜨면 PAGE_LIVE=false로 표시.
+            PAGE_LIVE=false
+            for i in $(seq 1 30); do
               CODE=$(curl -s -o /dev/null -w "%{http_code}" "$PAGE_URL")
               if [ "$CODE" = "200" ]; then
-                echo "✅ Pages 배포 완료 (${i}회 폴링, $((i*5))초)"
+                echo "✅ Pages 배포 완료 (${i}회 폴링, $((i*10))초)"
+                PAGE_LIVE=true
                 break
               fi
-              sleep 5
+              sleep 10
             done
+            if [ "$PAGE_LIVE" = "false" ]; then
+              echo "⚠️ 5분 폴링에도 페이지 미활성 (GitHub 배포 지연) — 안내 문구 추가 후 전송"
+            fi
           else
             echo "⚠️ URL 추출 실패 — 안전하게 60초 대기로 폴백"
             sleep 60
@@ -159,6 +166,11 @@ jobs:
           # [v5.9] -d "text=..." → --data-urlencode 로 변경
           # 메시지에 &, %, 공백, 한글 등이 있으면 -d는 깨지므로 urlencode 필수
           MESSAGE=$(cat docs/.pending_link.txt)
+          # [v5.21] 배포 지연 시 링크가 잠시 404일 수 있음을 사용자에게 안내
+          if [ "${PAGE_LIVE:-true}" = "false" ]; then
+            MESSAGE="${MESSAGE}
+⏳ 페이지 배포 지연 중 — 링크가 몇 분 후에 열릴 수 있어요"
+          fi
           HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
