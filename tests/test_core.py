@@ -148,6 +148,14 @@ class TestRegime:
         assert r["유형"] == "하락장"
         assert r["모멘텀_가중"] == "끔"
 
+    def test_custom_thresholds(self):
+        from market_phase import classify_market_regime
+        # 커스텀 임계값으로 K자 기준 완화
+        r = classify_market_regime(
+            [{"변동률": v} for v in [5.0] + [-1.0] * 10 + [1.0] * 4],
+            current_vix=20, settings={"REGIME_K_BREADTH": 50})
+        assert r["유형"] == "K자양극화"
+
     def test_sideways(self):
         from market_phase import classify_market_regime
         s = [{"변동률": v} for v in ([0.3, -0.2, 0.1, -0.4] * 6)]
@@ -216,6 +224,15 @@ class TestPerformanceTracker:
             if os.path.exists(pt._log_path()):
                 os.remove(pt._log_path())
 
+    def test_grading_alerts(self):
+        from performance_tracker import format_grading_alerts
+        통계 = {"채점": 1, "승": 1, "패": 0, "중립": 0, "알림": [
+            {"name": "삼성", "ticker": "005930.KS", "전략": "안정",
+             "결과": "승", "수익률": 12.3}]}
+        alert = format_grading_alerts(통계)
+        assert "목표 도달" in alert and "삼성" in alert
+        assert format_grading_alerts({"알림": []}) == ""
+
     def test_grading(self):
         pt = self._setup_temp("test_pt_2.json")
         try:
@@ -268,3 +285,47 @@ class TestObservability:
 if __name__ == "__main__":
     import subprocess
     subprocess.run(["python3", "-m", "pytest", __file__, "-v"])
+
+
+# ═══════════════════════════════════════════════════════════
+# 8. 통합 일관성 (스코프/언팩 버그 방지 — v5.21에서 발견된 실버그 재발 방지)
+# ═══════════════════════════════════════════════════════════
+class TestIntegrationConsistency:
+    def test_build_report_sections_return_matches_unpack(self):
+        """build_report_sections의 return 개수와 호출부 언팩 개수가 일치해야 한다.
+        (실제 CI에서 '모멘텀_결과_맵 is not defined' NameError가 났던 버그 방지)"""
+        import ast, os
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "scheduler_job.py")
+        tree = ast.parse(open(path, encoding="utf-8").read())
+
+        return_arity = None
+        unpack_arity = None
+        for node in ast.walk(tree):
+            # 함수 내부 return 튜플 크기
+            if isinstance(node, ast.FunctionDef) and node.name == "build_report_sections":
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Return) and isinstance(sub.value, ast.Tuple):
+                        return_arity = len(sub.value.elts)
+            # 호출부 언팩 크기: (a, b, ...) = build_report_sections(...)
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                fn = node.value.func
+                if isinstance(fn, ast.Name) and fn.id == "build_report_sections":
+                    tgt = node.targets[0]
+                    if isinstance(tgt, ast.Tuple):
+                        unpack_arity = len(tgt.elts)
+
+        assert return_arity is not None, "return 튜플 못 찾음"
+        assert unpack_arity is not None, "언팩 호출부 못 찾음"
+        assert return_arity == unpack_arity, (
+            f"return {return_arity}개 vs 언팩 {unpack_arity}개 불일치")
+
+    def test_run_analysis_no_undefined_momentum_map(self):
+        """run_analysis 영역에서 쓰는 모멘텀_결과_맵이 언팩으로 정의돼 있어야 한다."""
+        import os
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "scheduler_job.py")
+        src = open(path, encoding="utf-8").read()
+        # 언팩 라인에 모멘텀_결과_맵 포함 확인
+        assert "모멘텀_결과_맵) = build_report_sections(" in src.replace("\n", "").replace(" ", "") \
+            or "모멘텀_결과_맵)=build_report_sections(" in src.replace("\n", "").replace(" ", "")

@@ -173,6 +173,20 @@ def backtest_momentum(ticker: str, market: str, settings: dict,
         high20_s = close.rolling(20).max()
         vol20_s = volume.rolling(20).mean()
 
+        # ── RS(상대강도) 사전 계산 — 실전 5조건과 일치시키기 위함 ──
+        # 벤치마크를 종목 인덱스에 맞춰 정렬 후, 20일 상대수익률 시리즈 생성.
+        # (v5.20: 기존엔 백테스트가 4조건이라 실전보다 느슨 → 과대평가 문제 수정)
+        bench = get_benchmark_close(settings, market)
+        rs_series = None
+        if bench is not None and len(bench) > 0:
+            try:
+                bench_aligned = bench.reindex(close.index).ffill().bfill()
+                종목_20수익 = close.pct_change(20)
+                시장_20수익 = bench_aligned.pct_change(20)
+                rs_series = (종목_20수익 - 시장_20수익) * 100  # %p
+            except Exception:
+                rs_series = None
+
         # 거래 비용 — 안정봇과 동일 가정 (strategy_utils로 통일, 공정 비교)
         매수비용, 매도비용 = get_trade_costs(settings, market)
 
@@ -193,8 +207,14 @@ def backtest_momentum(ticker: str, market: str, settings: dict,
                 거래량ok = 평균거래 > 0 and float(volume.iloc[i]) >= 평균거래 * M_VOL_MULT
                 당일강세 = (현재가 / 전일종가 - 1) * 100 >= M_DAY_GAIN
 
-                # RS는 백테스트에서 생략(벤치마크 시점 정렬 복잡) → 4조건으로 근사
-                if not (신고가ok and 정배열ok and 거래량ok and 당일강세):
+                # RS 조건 (실전과 동일한 5번째 조건) — 벤치마크 있을 때만
+                if rs_series is not None:
+                    rs_val = rs_series.iloc[i]
+                    rs_ok = (not pd.isna(rs_val)) and rs_val >= M_RS_THRESHOLD
+                else:
+                    rs_ok = True   # 벤치마크 없으면 RS 조건 통과 처리(4조건 폴백)
+
+                if not (신고가ok and 정배열ok and 거래량ok and 당일강세 and rs_ok):
                     i += 1; continue
 
                 # 다음날 시가 매수 (현실적 진입)

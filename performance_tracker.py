@@ -134,7 +134,7 @@ def grade_pending_signals(가격조회함수) -> dict:
     """
     data = _load_log()
     오늘_dt = datetime.now(_KST)
-    통계 = {"채점": 0, "승": 0, "패": 0, "중립": 0}
+    통계 = {"채점": 0, "승": 0, "패": 0, "중립": 0, "알림": []}
 
     for sig in data["signals"]:
         if sig["상태"] != "보유중":
@@ -156,21 +156,34 @@ def grade_pending_signals(가격조회함수) -> dict:
         if df is None or len(df) == 0:
             continue
 
-        # 발생일 이후 구간의 고가/저가로 판정
+        # 발생일 이후 구간의 고가/저가로 판정 (v5.20: 날짜 인덱스 직접 비교로 정밀화)
         try:
             close = df["Close"].squeeze()
             high  = df["High"].squeeze() if "High" in df.columns else close
             low   = df["Low"].squeeze()  if "Low"  in df.columns else close
-            # 발생일 이후 데이터만
-            이후 = close[close.index > 발생일] if hasattr(close.index, "__gt__") else close.tail(경과일 + 1)
-            if len(이후) == 0:
-                이후_고 = float(high.iloc[-1]); 이후_저 = float(low.iloc[-1])
-                현재 = float(close.iloc[-1])
+            현재 = float(close.iloc[-1])
+
+            # 인덱스가 날짜형이면 발생일 이후만 정확히 필터링
+            발생일_naive = 발생일.replace(tzinfo=None)
+            mask = None
+            try:
+                idx = close.index
+                if hasattr(idx, "tz") and idx.tz is not None:
+                    idx_cmp = idx.tz_localize(None)
+                else:
+                    idx_cmp = idx
+                mask = idx_cmp > 발생일_naive
+            except Exception:
+                mask = None
+
+            if mask is not None and hasattr(mask, "sum") and mask.sum() > 0:
+                이후_고 = float(high[mask].max())
+                이후_저 = float(low[mask].min())
             else:
-                n = len(이후)
+                # 폴백: 경과일 기반 tail 근사
+                n = max(1, 경과일)
                 이후_고 = float(high.tail(n).max())
                 이후_저 = float(low.tail(n).min())
-                현재 = float(close.iloc[-1])
         except Exception:
             continue
 
@@ -200,6 +213,12 @@ def grade_pending_signals(가격조회함수) -> dict:
             sig["수익률"] = round(수익률, 2)
             통계["채점"] += 1
             통계[결과] = 통계.get(결과, 0) + 1
+            # 실시간 알림용: 방금 채점된 신호 상세 (v5.20)
+            통계["알림"].append({
+                "name": sig.get("name", sig["ticker"]),
+                "ticker": sig["ticker"], "전략": sig.get("전략", ""),
+                "결과": 결과, "수익률": round(수익률, 2),
+            })
 
     if 통계["채점"]:
         _save_log(data)
@@ -327,3 +346,23 @@ def record_and_grade(신호_종목_요약: list, 모멘텀_결과_맵: dict,
 
     # 이전 신호 채점 (캐시된 가격 재사용)
     return grade_pending_signals(가격조회함수)
+
+
+def format_grading_alerts(채점통계: dict) -> str:
+    """
+    방금 목표/손절에 도달한 신호를 리포트용 알림 텍스트로 만든다. (v5.20)
+
+    [중학생 설명]
+    "3일 전 추천한 삼성전자가 목표가 도달! +12%" 같은 실시간 결과 알림.
+    실제 매매에 바로 도움이 되도록, 채점되는 순간 리포트에 띄운다.
+    """
+    알림 = 채점통계.get("알림", [])
+    if not 알림:
+        return ""
+    줄 = ["🔔 *신호 결과 업데이트*"]
+    for a in 알림[:8]:
+        아이콘 = "🎯" if a["결과"] == "승" else ("🛑" if a["결과"] == "패" else "⏹️")
+        전략아이콘 = "🛡️" if a["전략"] == "안정" else "⚡"
+        판정 = {"승": "목표 도달", "패": "손절", "중립": "청산"}.get(a["결과"], a["결과"])
+        줄.append(f"  {아이콘} {전략아이콘} {a['name']}: {판정} ({a['수익률']:+.1f}%)")
+    return "\n".join(줄) + "\n"

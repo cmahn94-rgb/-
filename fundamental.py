@@ -1165,6 +1165,9 @@ _supply_demand_source_count: dict[str, int] = {
 # CI 환경에선 호출 자체를 건너뛰어 로그 오염(pykrx 내부 print)과 시간 낭비를 막는다.
 IS_CI = os.getenv("GITHUB_ACTIONS") == "true"
 
+# 네이버 모바일 수급 실패 원인 로그 — 실행당 1회만 (로그 폭발 방지)
+_naver_mobile_err_logged = False
+
 # 종목코드 → KRX ISIN 코드 변환 캐시
 _isin_cache: dict[str, str] = {}
 
@@ -1442,6 +1445,7 @@ def _fetch_naver_mobile_supply_demand(ticker_ks: str, days: int = 10) -> pd.Data
     반환: 표준 DataFrame (날짜/외국인_순매수/기관합계_순매수/개인_순매수/외국인_보유율)
           실패 시 None → 다음 폴백으로
     """
+    global _naver_mobile_err_logged
     code = ticker_ks.replace(".KS", "").replace(".KQ", "").strip().zfill(6)
     url = f"https://m.stock.naver.com/api/stock/{code}/trend"
     headers = {
@@ -1456,15 +1460,23 @@ def _fetch_naver_mobile_supply_demand(ticker_ks: str, days: int = 10) -> pd.Data
     }
 
     r = None
+    _err = ""
     for _attempt in range(2):
         try:
             r = requests.get(url, headers=headers, timeout=10)
             if r.status_code == 200:
                 break
-        except Exception:
+            _err = f"HTTP {r.status_code}"
+        except Exception as _e:
+            _err = type(_e).__name__
             if _attempt == 0:
                 time.sleep(1)
     if r is None or r.status_code != 200:
+        # [v5.21 진단] 실패 원인을 실행당 1회만 로그 (403=차단, Timeout=지연 등 구분용)
+        # naver_mobile=0이 떴을 때 '왜'를 알 수 없던 문제 해결 → 다음 대응 방향 결정
+        if not _naver_mobile_err_logged:
+            print(f"  🔎 네이버모바일 수급 실패 원인(첫 건): {_err or '알수없음'} ({ticker_ks})")
+            _naver_mobile_err_logged = True
         return None
 
     try:
@@ -1472,6 +1484,10 @@ def _fetch_naver_mobile_supply_demand(ticker_ks: str, days: int = 10) -> pd.Data
         # 응답이 list 또는 {"result":[...]} 형태
         rows = data if isinstance(data, list) else (data.get("result") or data.get("trends") or [])
         if not rows:
+            # [v5.21 진단] 200인데 빈 응답 = API 구조 변경 가능성
+            if not _naver_mobile_err_logged:
+                print(f"  🔎 네이버모바일 200이나 빈 응답 — API 구조 변경 의심 ({ticker_ks}): {str(data)[:80]}")
+                _naver_mobile_err_logged = True
             return None
 
         날짜_l, 외국인_l, 기관_l, 개인_l, 보유율_l = [], [], [], [], []

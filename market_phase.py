@@ -470,7 +470,8 @@ def _calc_bear_score() -> int:
 # 안정·모멘텀 두 전략 중 어디에 무게를 둘지 정한다.
 # ═══════════════════════════════════════════════════════════════
 
-def classify_market_regime(분석결과목록: list, current_vix: float | None = None) -> dict:
+def classify_market_regime(분석결과목록: list, current_vix: float | None = None,
+                           settings: dict | None = None) -> dict:
     """
     이미 분석한 종목들의 데이터로 '장세 유형'을 분류한다.
 
@@ -545,19 +546,30 @@ def classify_market_regime(분석결과목록: list, current_vix: float | None =
             "안정_가중": 안정, "모멘텀_가중": 모멘텀, "한줄진단": 진단,
         }
 
-    if breadth < 35 and 급등 >= 1 and vix >= 18:
+    # 장세 임계값 (settings.txt로 조정 가능, 없으면 기본값)
+    # v5.20: 하드코딩 → 외부화. 성과 데이터 쌓이면 이 값들을 역보정 가능.
+    _s = settings or {}
+    _K_BREADTH = float(_s.get("REGIME_K_BREADTH", 35))   # K자: breadth 이 미만
+    _K_VIX     = float(_s.get("REGIME_K_VIX", 18))       # K자: VIX 이 이상
+    _BEAR_BREADTH = float(_s.get("REGIME_BEAR_BREADTH", 30))
+    _BEAR_VIX     = float(_s.get("REGIME_BEAR_VIX", 25))
+    _TREND_LOW    = float(_s.get("REGIME_TREND_BREADTH_LOW", 40))
+    _TREND_HIGH   = float(_s.get("REGIME_TREND_BREADTH_HIGH", 65))
+    _TREND_VIX    = float(_s.get("REGIME_TREND_VIX_MAX", 22))
+
+    if breadth < _K_BREADTH and 급등 >= 1 and vix >= _K_VIX:
         유형 = "K자양극화"
         안정, 모멘텀 = "침묵", "주력"
         진단 = f"소수 종목 쏠림(breadth {breadth:.0f}%). 안정 침묵 정상, 모멘텀 위주 대응·손절 엄수."
-    elif breadth < 30 and vix >= 25:
+    elif breadth < _BEAR_BREADTH and vix >= _BEAR_VIX:
         유형 = "하락장"
         안정, 모멘텀 = "현금", "끔"
         진단 = f"전반 약세(breadth {breadth:.0f}%, VIX {vix:.0f}). 현금 비중 확대, 역추세 매수 자제."
-    elif 40 <= breadth <= 65 and vix < 22:
+    elif _TREND_LOW <= breadth <= _TREND_HIGH and vix < _TREND_VIX:
         유형 = "추세장"
         안정, 모멘텀 = "주력", "보조"
         진단 = f"종목 고른 상승(breadth {breadth:.0f}%). 안정 전략 주력, 모멘텀 보조."
-    elif breadth > 65:
+    elif breadth > _TREND_HIGH:
         유형 = "추세장"
         안정, 모멘텀 = "주력", "보조"
         진단 = f"광범위 강세(breadth {breadth:.0f}%). 안정 주력, 추격은 신중히."

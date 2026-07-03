@@ -26,3 +26,13 @@ M_STOP=-2.5             # 손절 % (안정봇 -5%보다 타이트)
 M_TARGET=5.0            # 익절 % (짧게 먹고 나옴)
 M_TRAIL=3.0             # 트레일링 스탑 %
 M_HOLD_DAYS=2           # 최대 보유일 (단타)
+
+# ── 장세 판단 임계값 (듀얼 전략 가중치 결정) ──
+# breadth = 분석 종목 중 상승 비율(%). 성과 데이터 쌓이면 조정 권장.
+REGIME_K_BREADTH=35        # K자양극화: breadth 이 값 미만 + 급등종목 존재
+REGIME_K_VIX=18            # K자양극화: VIX 이 값 이상
+REGIME_BEAR_BREADTH=30     # 하락장: breadth 이 값 미만
+REGIME_BEAR_VIX=25         # 하락장: VIX 이 값 이상
+REGIME_TREND_BREADTH_LOW=40   # 추세장: breadth 하한
+REGIME_TREND_BREADTH_HIGH=65  # 추세장: breadth 상한
+REGIME_TREND_VIX_MAX=22    # 추세장: VIX 이 값 미만
