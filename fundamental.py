@@ -1158,7 +1158,7 @@ _supply_demand_cache: dict[str, dict] = {}
 
 # 수급 소스별 성공 카운터 (실행당 진단 요약용)
 _supply_demand_source_count: dict[str, int] = {
-    "naver_mobile": 0, "pykrx": 0, "krx": 0, "naver": 0, "fdr": 0,
+    "naver_mobile": 0, "naver_chart": 0, "pykrx": 0, "krx": 0, "naver": 0, "fdr": 0,
     "yfinance_보유율": 0, "전체실패": 0,
 }
 # GitHub Actions(해외 IP) 감지 — pykrx/KRX직접은 해외 IP 차단으로 100% 실패하므로
@@ -1335,100 +1335,6 @@ def _fetch_krx_supply_demand(ticker_ks: str, days: int = 10) -> pd.DataFrame | N
 
 def _fetch_naver_mobile_supply_demand(ticker_ks: str, days: int = 10) -> pd.DataFrame | None:
     """
-    네이버 '모바일' 증권 API로 외국인/기관 일별 순매수를 가져온다. (수급 1순위)
-
-    [중학생 설명]
-    데스크톱 네이버(finance.naver.com)·KRX·pykrx는 GitHub Actions 해외 IP에서
-    전부 차단됐다. 그런데 '모바일' 네이버(m.stock.naver.com)는 다른 경로라
-    해외 IP에서도 열려있음을 진단(check_supply.py)으로 확인했다.
-
-    엔드포인트: https://m.stock.naver.com/api/stock/{code}/trend
-    응답: 일별 [{bizdate, frgn_pure_buy_quant, organ_pure_buy_quant,
-                frgn_hold_ratio, indi_pure_buy_quant}, ...]
-    이건 뉴스 텍스트가 아니라 '외국인 순매수 수량' 같은 실제 수치라
-    수급 점수(외국인 N일 연속 +1점 등)에 바로 쓸 수 있다.
-
-    [한계]
-    네이버가 모바일 API에도 차단을 걸면 실패할 수 있다 → graceful None 반환.
-    """
-    try:
-        code = ticker_ks.replace(".KS", "").replace(".KQ", "").strip().zfill(6)
-        url = f"https://m.stock.naver.com/api/stock/{code}/trend"
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                "Version/17.0 Mobile/15E148 Safari/604.1"
-            ),
-            "Accept":          "application/json, text/plain, */*",
-            "Accept-Language": "ko-KR,ko;q=0.9",
-            "Referer":         "https://m.stock.naver.com/",
-        }
-
-        r = None
-        for _attempt in range(2):
-            try:
-                r = requests.get(url, headers=headers, timeout=12)
-                if r.status_code == 200:
-                    break
-            except Exception:
-                if _attempt == 0:
-                    time.sleep(1)
-        if r is None or r.status_code != 200:
-            return None
-
-        data = r.json()
-        # 응답은 list 또는 {"result":[...]} / {"trends":[...]} 형태
-        rows = data if isinstance(data, list) else (
-            data.get("result") or data.get("trends") or []
-        )
-        if not rows:
-            return None
-
-        def _num(v):
-            if v is None:
-                return 0
-            if isinstance(v, (int, float)):
-                return v
-            t = str(v).replace(",", "").replace("+", "").strip()
-            try:
-                return float(t) if "." in t else int(t)
-            except Exception:
-                return 0
-
-        records = []
-        for row in rows:
-            날짜 = row.get("bizdate") or row.get("localTradedAt") or row.get("date")
-            if not 날짜:
-                continue
-            records.append({
-                "날짜":           str(날짜),
-                "외국인_순매수":   _num(row.get("frgn_pure_buy_quant")
-                                       or row.get("foreignerPureBuyQuant")),
-                "기관합계_순매수": _num(row.get("organ_pure_buy_quant")
-                                       or row.get("organPureBuyQuant")),
-                "개인_순매수":     _num(row.get("indi_pure_buy_quant")
-                                       or row.get("individualPureBuyQuant")),
-                "외국인_보유율":   _num(row.get("frgn_hold_ratio")
-                                       or row.get("foreignerHoldRatio")),
-            })
-        if not records:
-            return None
-
-        df = pd.DataFrame(records)
-        df["날짜"] = pd.to_datetime(df["날짜"], format="%Y%m%d", errors="coerce")
-        # 포맷이 다르면 자동 파싱 재시도
-        if df["날짜"].isna().all():
-            df["날짜"] = pd.to_datetime(pd.DataFrame(records)["날짜"], errors="coerce")
-        df = df.dropna(subset=["날짜"]).sort_values("날짜").tail(days)
-        return df if len(df) >= 3 else None
-
-    except Exception:
-        return None
-
-
-def _fetch_naver_mobile_supply_demand(ticker_ks: str, days: int = 10) -> pd.DataFrame | None:
-    """
     네이버 모바일 증권 API로 외국인/기관 일별 순매수를 가져온다. (수급 1순위)
 
     [중학생 설명]
@@ -1490,13 +1396,30 @@ def _fetch_naver_mobile_supply_demand(ticker_ks: str, days: int = 10) -> pd.Data
                 _naver_mobile_err_logged = True
             return None
 
+        # ── 필드명 폴백 (v5.22): check_supply.py에서 성공 확인된 3중 폴백과 일치
+        # + 적응형 키 탐지: 네이버가 필드명을 또 바꿔도 frgn/foreign 포함 키를 자동 발견
+        def _pick(row: dict, candidates: list, keywords: tuple):
+            for c in candidates:                 # 1) 알려진 필드명 우선
+                if row.get(c) is not None:
+                    return row[c]
+            for k, v in row.items():             # 2) 적응형: 키워드 포함 키 탐색
+                kl = k.lower()
+                if any(w in kl for w in keywords) and v is not None:
+                    return v
+            return None
+
         날짜_l, 외국인_l, 기관_l, 개인_l, 보유율_l = [], [], [], [], []
         for row in rows:
-            bizdate = row.get("bizdate") or row.get("localTradedAt") or row.get("date")
-            frgn    = row.get("frgn_pure_buy_quant")
-            organ   = row.get("organ_pure_buy_quant")
-            indi    = row.get("indi_pure_buy_quant")
-            ratio   = row.get("frgn_hold_ratio")
+            if not isinstance(row, dict):
+                continue
+            bizdate = _pick(row, ["bizdate", "localTradedAt", "date", "dt"], ("date", "biz", "dt"))
+            frgn  = _pick(row, ["frgn_pure_buy_quant", "foreignerPureBuyQuant", "foreignerNetBuy"],
+                          ("frgn", "foreign"))
+            organ = _pick(row, ["organ_pure_buy_quant", "organPureBuyQuant", "organNetBuy"],
+                          ("organ",))
+            indi  = _pick(row, ["indi_pure_buy_quant", "individualPureBuyQuant", "individualNetBuy"],
+                          ("indi",))
+            ratio = _pick(row, ["frgn_hold_ratio", "foreignerHoldRatio"], ("ratio", "hold"))
             if bizdate is None or (frgn is None and organ is None):
                 continue
             날짜_l.append(str(bizdate))
@@ -1506,6 +1429,12 @@ def _fetch_naver_mobile_supply_demand(ticker_ks: str, days: int = 10) -> pd.Data
             보유율_l.append(_to_num(ratio))
 
         if len(날짜_l) < 3:
+            # [v5.22 진단] 200+rows 있는데 유효 레코드 <3 = 필드명 불일치 (기존 침묵 경로)
+            # rows[0]의 실제 키를 덤프 → 다음 로그에서 정확한 스키마 확인 가능
+            if not _naver_mobile_err_logged:
+                _keys = list(rows[0].keys())[:15] if isinstance(rows[0], dict) else type(rows[0]).__name__
+                print(f"  🔎 네이버모바일 파싱 실패({len(날짜_l)}건) — rows[0] 키: {_keys} ({ticker_ks})")
+                _naver_mobile_err_logged = True
             return None
 
         out = pd.DataFrame({
@@ -1518,6 +1447,71 @@ def _fetch_naver_mobile_supply_demand(ticker_ks: str, days: int = 10) -> pd.Data
         # 날짜 오름차순 정렬 후 최근 days일
         out = out.sort_values("날짜").tail(days).reset_index(drop=True)
         return out if len(out) >= 3 else None
+    except Exception:
+        return None
+
+
+def _fetch_naver_chart_supply(ticker_ks: str, days: int = 10) -> "pd.DataFrame | None":
+    """
+    네이버 chart-info API로 '외국인소진율' 일별 데이터를 가져온다. (수급 2순위 폴백)
+
+    [중학생 설명]
+    check_supply.py 진단에서 trend와 함께 해외 IP에서 HTTP 200이 확인된
+    두 번째 생존 경로다. 응답은 [['날짜','시가',...,'외국인소진율'], [행], ...]
+    형태의 표. 외국인소진율(보유 비중)의 일별 '변화'가 곧 외국인이 사는지
+    파는지의 방향이다. 기관 데이터는 없지만, trend가 죽었을 때 외국인 축
+    하나라도 살리는 게 완전 실패보다 훨씬 낫다.
+
+    반환: 표준 df (외국인_순매수=소진율 일간변화, 기관/개인=0, 외국인_보유율=소진율)
+    """
+    import ast as _ast
+    code = ticker_ks.replace(".KS", "").replace(".KQ", "").strip().zfill(6)
+    url = (f"https://m.stock.naver.com/front-api/external/chart/domestic/info"
+           f"?symbol={code}&requestType=1&timeframe=day")
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                       "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                       "Version/17.0 Mobile/15E148 Safari/604.1"),
+        "Accept": "*/*", "Accept-Language": "ko-KR,ko;q=0.9",
+        "Referer": "https://m.stock.naver.com/",
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return None
+        # 응답은 작은따옴표 JS 배열 텍스트 → ast.literal_eval로 안전 파싱
+        txt = r.text.strip()
+        start = txt.find("[")
+        if start == -1:
+            return None
+        table = _ast.literal_eval(txt[start:])
+        if not isinstance(table, list) or len(table) < 5:
+            return None
+        header = [str(h) for h in table[0]]
+        if "외국인소진율" not in header:
+            return None
+        i_date = 0
+        i_ratio = header.index("외국인소진율")
+
+        날짜_l, 보유율_l = [], []
+        for row in table[1:]:
+            try:
+                날짜_l.append(str(row[i_date]))
+                보유율_l.append(float(str(row[i_ratio]).replace(",", "")))
+            except Exception:
+                continue
+        if len(날짜_l) < 4:
+            return None
+
+        df = pd.DataFrame({"날짜": 날짜_l, "외국인_보유율": 보유율_l})
+        df = df.sort_values("날짜").tail(days + 1).reset_index(drop=True)
+        # 소진율 일간 변화 = 외국인 순매수 '방향' (양수=매수, 음수=매도)
+        df["외국인_순매수"] = df["외국인_보유율"].diff()
+        df = df.dropna(subset=["외국인_순매수"]).reset_index(drop=True)
+        df["기관합계_순매수"] = 0.0
+        df["개인_순매수"]     = 0.0
+        df = df[["날짜", "외국인_순매수", "기관합계_순매수", "개인_순매수", "외국인_보유율"]]
+        return df if len(df) >= 3 else None
     except Exception:
         return None
 
@@ -1704,10 +1698,17 @@ def get_kr_supply_demand(ticker: str) -> dict:
     df = None
     성공_소스 = None
 
-    # 1순위: 네이버 모바일 (해외 IP에서도 열림 — 수급 flow 축 복구)
+    # 1순위: 네이버 모바일 trend (해외 IP에서도 열림 — 수급 flow 축 복구)
     df = _fetch_naver_mobile_supply_demand(ticker, days=10)
     if df is not None:
         성공_소스 = "naver_mobile"
+
+    # 1.5순위: 네이버 chart-info 소진율 (v5.22, CI 생존 확인된 2번째 경로)
+    # trend가 파싱 실패해도 외국인 방향 축은 살린다 (기관 없음)
+    if df is None:
+        df = _fetch_naver_chart_supply(ticker, days=10)
+        if df is not None:
+            성공_소스 = "naver_chart"
 
     # 2순위~: 로컬(한국 IP) 전용 소스 — CI에선 차단되므로 스킵
     if df is None and not IS_CI:
@@ -1856,12 +1857,13 @@ def get_supply_demand_diagnostics() -> str:
     """
     c = _supply_demand_source_count
     시도 = sum(c.values())
-    확보 = c["naver_mobile"] + c["pykrx"] + c["krx"] + c["naver"] + c["fdr"]
+    확보 = (c["naver_mobile"] + c["naver_chart"] + c["pykrx"]
+           + c["krx"] + c["naver"] + c["fdr"])
     env = "CI(해외IP)" if IS_CI else "로컬"
     lines = [
         "📊 ===== 수급 소스 진단 요약 =====",
         f"  환경: {env} | 시도: {시도}개 | 일별수급 확보: {확보}개",
-        f"  소스별: naver_mobile={c['naver_mobile']} / pykrx={c['pykrx']} / "
+        f"  소스별: naver_mobile={c['naver_mobile']} / naver_chart={c['naver_chart']} / pykrx={c['pykrx']} / "
         f"krx={c['krx']} / naver={c['naver']} / fdr={c['fdr']} / "
         f"yfinance(보유율만)={c['yfinance_보유율']} / 전체실패={c['전체실패']}",
     ]

@@ -168,9 +168,9 @@ def record_data_source_health(supply_counts: dict, vix_value: float) -> None:
         supply_counts: fundamental._supply_demand_source_count
         vix_value: settings["CURRENT_VIX"] (15.0=기본값=실패로 간주)
     """
-    확보 = (supply_counts.get("naver_mobile", 0) + supply_counts.get("pykrx", 0) +
-           supply_counts.get("krx", 0) + supply_counts.get("naver", 0) +
-           supply_counts.get("fdr", 0))
+    확보 = (supply_counts.get("naver_mobile", 0) + supply_counts.get("naver_chart", 0) +
+           supply_counts.get("pykrx", 0) + supply_counts.get("krx", 0) +
+           supply_counts.get("naver", 0) + supply_counts.get("fdr", 0))
     실패 = supply_counts.get("전체실패", 0)
     for _ in range(확보):
         health.record("수급", ok=True)

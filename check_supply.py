@@ -65,6 +65,8 @@ def _parse_trend(r):
     if not rows:
         return ""
     row = rows[0]
+    # [v5.22] 실제 필드명(스키마)을 로그에 노출 — 봇 파서와 대조용
+    print(f"       └ rows[0] 키: {list(row.keys())[:15]}")
     frgn = row.get("frgn_pure_buy_quant") or row.get("foreignerPureBuyQuant") or row.get("foreignerNetBuy")
     organ = row.get("organ_pure_buy_quant") or row.get("organPureBuyQuant") or row.get("organNetBuy")
     date = row.get("bizdate") or row.get("localTradedAt") or row.get("date") or "?"

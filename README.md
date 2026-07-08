@@ -867,6 +867,7 @@ SK하이닉스 (000660.KS) | ADX 32↑
 | v5.19 | **코드 리팩토링** — v5.18 하이엔드 통합 코드를 헬퍼로 추출: 성과 기록/채점 인라인 로직 → performance_tracker.record_and_grade(), 수급·VIX 헬스 반영 인라인 → observability.record_data_source_health(). scheduler_job.py의 run_analysis가 약 45줄 감소. 중복 import 제거. 동작 변화 없이 구조 정리, 22개 테스트 전부 통 추가로 성과 추적이 실제 누적되도록 워크플로가 signal_log.json·health_log.json을 커밋하게 수정(이 파일들이 커밋 안 되면 GitHub Actions 새 환경마다 초기화되어 성과가 안 쌓이던 이슈).과 |
 | v5.20 | **전략 성능 6대 개선** — ①모멘텀 백테스트에 RS 조건 추가(실전 5조건과 일치, 과대평가 해소) ②성과추적이 실제 목표가/손절가 기록(근사 제거로 채점 정확도↑) ③두 전략 합산 리스크 관리(안정+모멘텀 총 포지션 MAX_POSITIONS 이내, 장세별 모멘텀 캡) ④장세 임계값 settings 외부화(REGIME_* 파라미터화) ⑤채점 날짜 인덱스 정밀 비교(휴장일 오차 제거) ⑥목표/손절 도달 실시간 알림(🔔 신호 결과 업데이트). 테스트 22→24개. 안정봇 signals.py 무수정 |
 | v5.21 | **CI 실로그 기반 버그 수정 3건** — ①성과 추적 스코프 버그 수정: run_analysis가 build_report_sections 지역변수(모멘텀_결과_맵)를 참조해 NameError → 성과 추적이 통째로 미작동하던 문제. 반환값에 포함시켜 해결 + AST 일관성 테스트 2개 추가(재발 방지) ②네이버 모바일 수급 실패 원인 진단 로그(HTTP 코드·빈응답 구분, 실행당 1회) — naver_mobile=0의 '왜'를 다음 로그에서 판별 가능 ③Pages 배포 폴링 2분→5분 확장 + 미활성 시 텔레그램에 "배포 지연" 안내 문구(GitHub deployment_queued 지연 실사례 대응). 테스트 24→26개 |
+| v5.22 | **수급 완전 복구 (원인 규명 + 이중 방어)** — CI 진단으로 원인 확정: trend API는 살아있는데(HTTP 200 실데이터 확인) ①_fetch_naver_mobile_supply_demand가 중복 정의돼 진단 없는 구버전 파서가 실행됨(죽은 정의 94줄 삭제) ②살아있는 파서가 단일 필드명만 탐색해 네이버 필드 변경 시 침묵 실패. 해결: check_supply와 동일한 3중 필드 폴백 + 적응형 키 탐지(frgn/foreign 포함 키 자동 발견) + 파싱 실패 시 rows[0] 키 덤프 진단. 추가로 CI 생존 확인된 2번째 경로 chart-info(외국인소진율)를 naver_chart 폴백으로 신설(소진율 일간변화=외국인 매매 방향). check_supply도 스키마 키 덤프 출력 |
 
 ### v5.5 — RSI 게이트 전용화 및 전략 일관성
 
