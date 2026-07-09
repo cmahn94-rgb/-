@@ -24,4 +24,6 @@ jobs:
           python-version: '3.11'
 
       - name: Run RSS diagnostics
-        run: python check_rss.py
+        run: |
+          pip install requests
+          python check_rss.py
