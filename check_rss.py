@@ -91,6 +91,28 @@ if __name__ == "__main__":
             print(f"       └ {s}")
 
     # ── 종합 판단 ──────────────────────────────────────────
+    # [v5.23] 봇과 동일한 requests 라이브러리 경로 테스트
+    # urllib(위)=성공인데 requests=실패라면 → 라이브러리/TLS 지문 차단이 원인
+    print("\n[requests 라이브러리 경로 테스트 — 봇과 동일]")
+    try:
+        import requests as _rq
+        _url = ("https://news.google.com/rss/search?q=" +
+                urllib.parse.quote("삼성전자") +
+                "&hl=ko&gl=KR&ceid=" + urllib.parse.quote("KR:ko"))
+        _hdr = {
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/124.0.0.0 Safari/537.36"),
+            "Accept": "application/rss+xml, application/xml, text/xml, */*",
+            "Accept-Language": "ko-KR,ko;q=0.9",
+        }
+        _r = _rq.get(_url, headers=_hdr, timeout=15)
+        _n = _r.text.count("<item>") if _r.status_code == 200 else 0
+        print(f"  {'✅' if _r.status_code == 200 and _n > 0 else '❌'} "
+              f"requests: HTTP {_r.status_code} | 기사 {_n}개 | 최종URL {_r.url[:60]}")
+    except Exception as _e:
+        print(f"  ❌ requests 예외: {type(_e).__name__}: {_e}")
+
     평상시_ok = any(r["ok"] for r in results if r["name"].startswith("평상시"))
     이벤트_ok = any(r["ok"] for r in results if r["name"].startswith("이벤트"))
 

@@ -850,6 +850,9 @@ def _strip_html(text: str) -> str:
 
 
 # 구글 뉴스 RSS 요청 헤더 (브라우저로 위장 — 해외 IP 차단 완화)
+# RSS 실패 원인 로그 — 실행당 1회 (v5.23, 수급 진단과 동일 패턴)
+_rss_err_logged = False
+
 _GOOGLE_RSS_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -907,12 +910,21 @@ def _get_news_google_rss(ticker: str, name: str = "", 변동률: float = 0.0) ->
         f"https://news.google.com/rss/search?q={q}"
         f"&hl=ko&gl=KR&ceid={urllib.parse.quote('KR:ko')}"
     )
+    global _rss_err_logged
     try:
-        resp = requests.get(url, headers=_GOOGLE_RSS_HEADERS, timeout=10)
+        resp = requests.get(url, headers=_GOOGLE_RSS_HEADERS, timeout=15)
         if resp.status_code != 200:
+            # [v5.23 진단] RSS가 조용히 죽어 NewsAPI 1개짜리로 폴백되던 문제 —
+            # 원인(차단/리다이렉트 등)을 실행당 1회 로그로 노출
+            if not _rss_err_logged:
+                print(f"  🔎 구글RSS 실패 원인(첫 건): HTTP {resp.status_code} ({ticker})")
+                _rss_err_logged = True
             return []
         root = _ET.fromstring(resp.content)
-    except Exception:
+    except Exception as _e:
+        if not _rss_err_logged:
+            print(f"  🔎 구글RSS 실패 원인(첫 건): {type(_e).__name__} ({ticker})")
+            _rss_err_logged = True
         return []
 
     # ── 3. 발행일 필터 기준 (3일 이내) ────────────────────
@@ -956,6 +968,11 @@ def _get_news_google_rss(ticker: str, name: str = "", 변동률: float = 0.0) ->
         })
 
     if not 후보:
+        # [v5.23 진단] 원본은 있었는데 필터(3일/노이즈/길이)로 전멸한 경우 구분
+        if not _rss_err_logged:
+            _raw_n = len(root.findall(".//item"))
+            print(f"  🔎 구글RSS 필터 전멸: 원본 {_raw_n}개 → 필터 후 0개 ({ticker})")
+            _rss_err_logged = True
         return []
 
     # ── 3. 최신순 정렬 ────────────────────────────────────
@@ -1047,6 +1064,18 @@ def get_news(ticker: str, name: str = "", 변동률: float = 0.0) -> list[dict]:
 
     if not raw_items:
         return []
+
+    # ── [v5.23] 한국 종목 관련성 필터 ──────────────────────────
+    # NewsAPI/GNews가 한국 종목에 무관한 기사(종목명 미포함)를 주는 경우가 많다.
+    # RSS 침묵 시 이 허접 기사들이 리포트를 채우던 문제 → 종목명 포함 기사만 통과.
+    if ticker.endswith(".KS") or ticker.endswith(".KQ"):
+        _name_c = name.replace(" ", "")
+        _filtered = [it for it in raw_items
+                     if _name_c and _name_c in
+                     (it.get("title", "") + it.get("summary", "")).replace(" ", "")]
+        # 필터가 전부 날리면(이름 표기 차이 등) 원본 유지 — 뉴스 0개보단 낫다
+        if _filtered:
+            raw_items = _filtered
 
     # ── 제목 중복 제거 (RSS·GNews가 같은 기사를 줄 수 있음) ──
     # 정규화(공백·기호 제거, 소문자)한 제목 앞 40자로 중복 판정
