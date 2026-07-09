@@ -329,3 +329,52 @@ class TestIntegrationConsistency:
         # 언팩 라인에 모멘텀_결과_맵 포함 확인
         assert "모멘텀_결과_맵) = build_report_sections(" in src.replace("\n", "").replace(" ", "") \
             or "모멘텀_결과_맵)=build_report_sections(" in src.replace("\n", "").replace(" ", "")
+
+
+
+# ═══════════════════════════════════════════════════════════
+# 9. 워크플로우 YAML 유효성 (v5.24 — run_analysis.yml YAML 깨짐 재발 방지)
+# ═══════════════════════════════════════════════════════════
+class TestWorkflowYAML:
+    """GitHub Actions 워크플로우 YAML이 파싱 가능한지 검증.
+    (v5.21에서 run_analysis.yml에 멀티라인 문자열을 넣어 YAML이 깨지고
+    워크플로우가 아예 실행 불가였던 버그 방지 — bash 멀티라인은 $'\\n' 사용)"""
+
+    def _workflow_dir(self):
+        import os
+        return os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            ".github", "workflows")
+
+    def test_all_workflows_parse(self):
+        import os
+        try:
+            import yaml
+        except ImportError:
+            import pytest
+            pytest.skip("pyyaml 미설치")
+        wd = self._workflow_dir()
+        if not os.path.isdir(wd):
+            import pytest
+            pytest.skip("워크플로우 폴더 없음")
+        for fn in os.listdir(wd):
+            if fn.endswith((".yml", ".yaml")):
+                path = os.path.join(wd, fn)
+                # 예외 없이 파싱되면 통과
+                yaml.safe_load(open(path, encoding="utf-8"))
+
+    def test_run_analysis_has_schedule(self):
+        import os
+        try:
+            import yaml
+        except ImportError:
+            import pytest
+            pytest.skip("pyyaml 미설치")
+        path = os.path.join(self._workflow_dir(), "run_analysis.yml")
+        if not os.path.exists(path):
+            import pytest
+            pytest.skip("run_analysis.yml 없음")
+        d = yaml.safe_load(open(path, encoding="utf-8"))
+        # YAML에서 'on'은 True로 파싱될 수 있음
+        on = d.get("on", d.get(True, {}))
+        assert "schedule" in on, "run_analysis에 schedule 트리거가 있어야 함"
