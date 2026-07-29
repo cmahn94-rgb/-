@@ -248,8 +248,10 @@ class TestPerformanceTracker:
 
             def mock_price(ticker, period="3mo"):
                 dates = pd.date_range(datetime.now() - timedelta(days=10), periods=10, tz=KST)
-                close = pd.Series([70000, 71000, 79000, 75000, 76000,
-                                   77000, 78000, 79500, 79000, 80000], index=dates)
+                # v5.25: 지정가(70000)까지 하락해 '체결'된 뒤 목표(78400) 도달하는 흐름.
+                # (체결되지 않으면 미체결로 분류되는 것이 정상 동작)
+                close = pd.Series([72000, 71000, 70500, 71000, 72000,
+                                   73000, 68000, 75000, 79000, 80000], index=dates)
                 return pd.DataFrame({"Close": close, "High": close * 1.01, "Low": close * 0.99}, index=dates)
 
             통계 = pt.grade_pending_signals(mock_price)
@@ -378,3 +380,77 @@ class TestWorkflowYAML:
         # YAML에서 'on'은 True로 파싱될 수 있음
         on = d.get("on", d.get(True, {}))
         assert "schedule" in on, "run_analysis에 schedule 트리거가 있어야 함"
+
+
+# ═══════════════════════════════════════════════════════════
+# 10. 진입가/목표/손절 정합성 (v5.25 — 손절가>진입가 모순 재발 방지)
+# ═══════════════════════════════════════════════════════════
+class TestEntryPriceConsistency:
+    """급락으로 ATR이 폭증해도 손절 < 진입 < 목표 순서가 깨지지 않아야 한다.
+    (실제 SK하이닉스 사례: ATR이 주가의 16.8% → 손절가가 진입가보다 14% 위)"""
+
+    @staticmethod
+    def _levels(현재가, atr, gap_cap=5.0, bb하단=0, T1=12, T2=25, STOP=-5):
+        진입_atr = 현재가 - atr if atr > 0 else 0
+        후보 = [v for v in (bb하단, 진입_atr) if 0 < v < 현재가]
+        진입 = max(후보) if 후보 else 현재가
+        진입 = max(진입, 현재가 * (1 - gap_cap / 100))
+        return (진입, 진입 * (1 + T1 / 100),
+                진입 * (1 + T2 / 100), 진입 * (1 + STOP / 100))
+
+    def test_extreme_atr_no_contradiction(self):
+        진입, t1, t2, 손절 = self._levels(1_401_000, 235_150)   # ATR 16.8%
+        assert 손절 < 진입 < t1 < t2
+
+    def test_gap_cap_applied(self):
+        진입, _, _, _ = self._levels(1_401_000, 235_150, gap_cap=5.0)
+        assert 진입 == 1_401_000 * 0.95   # 상한이 걸려야 함
+
+    def test_normal_atr_unchanged(self):
+        진입, _, _, 손절 = self._levels(70_000, 1_400)   # ATR 2%
+        assert abs(진입 - 68_600) < 1     # 원래 로직(현재가-ATR) 유지
+        assert 손절 < 진입
+
+    def test_analyze_one_returns_entry_fields(self):
+        """analyze_one 반환 dict에 진입가 필드가 있어야 리포트/성과추적이 일치한다."""
+        import os
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "scheduler_job.py")
+        src = open(path, encoding="utf-8").read()
+        for key in ('"추천_진입가"', '"진입가_bb"', '"진입_가드"'):
+            assert key in src, f"{key} 누락"
+
+
+class TestUnfilledGrading:
+    """지정가 미체결 신호를 승/패로 채점하면 승률이 왜곡된다 (v5.25)."""
+
+    def test_unfilled_excluded(self):
+        import os, pandas as pd
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        import performance_tracker as pt
+        KST = ZoneInfo("Asia/Seoul")
+        pt._LOG_FILENAME = "test_unfilled.json"
+        if os.path.exists(pt._log_path()):
+            os.remove(pt._log_path())
+        try:
+            발생 = (datetime.now(KST) - timedelta(days=40)).strftime("%Y-%m-%d")
+            pt._save_log({"signals": [{
+                "id": "nf", "날짜": 발생, "ticker": "NOFILL.KS", "name": "미체결",
+                "market": "KR", "전략": "안정", "진입가": 95, "목표가": 106,
+                "손절가": 90, "보유상한일": 30, "상태": "보유중",
+                "채점일": None, "결과": None, "수익률": None}]})
+
+            def mp(t, period="3mo"):
+                d = pd.date_range(datetime.now() - timedelta(days=35),
+                                  periods=35, tz=KST)
+                c = pd.Series([100 + i * 0.3 for i in range(35)], index=d)
+                return pd.DataFrame({"Close": c, "High": c * 1.005,
+                                     "Low": c * 0.995}, index=d)
+
+            통계 = pt.grade_pending_signals(mp)
+            assert 통계.get("미체결", 0) == 1
+            assert 통계["승"] == 0 and 통계["패"] == 0
+        finally:
+            if os.path.exists(pt._log_path()):
+                os.remove(pt._log_path())

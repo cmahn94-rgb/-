@@ -138,6 +138,7 @@ def validate_settings(settings: dict) -> list:
         ("M_STOP",         -50, -0.1, -2.5, "모멘텀 손절(음수여야 함)"),
         ("M_TARGET",       0.1, 100,  5.0,  "모멘텀 익절"),
         ("M_VOL_MULT",     1.0, 20,   2.0,  "모멘텀 거래량 배수"),
+        ("ENTRY_GAP_MAX_PCT", 0.5, 30,  5.0,  "진입 추천가 최대 괴리%"),
     ]
 
     for 키, 최소, 최대, 기본, 설명 in 규칙:

@@ -36,3 +36,9 @@ REGIME_BEAR_VIX=25         # 하락장: VIX 이 값 이상
 REGIME_TREND_BREADTH_LOW=40   # 추세장: breadth 하한
 REGIME_TREND_BREADTH_HIGH=65  # 추세장: breadth 상한
 REGIME_TREND_VIX_MAX=22    # 추세장: VIX 이 값 미만
+
+# ── 진입 추천가 가드 (v5.25) ──
+# 급락으로 ATR/볼린저하단이 폭증하면 체결 불가능한 지정가가 나온다.
+# 진입 추천가가 현재가 대비 이 %보다 더 내려가지 않도록 제한한다.
+# (목표·손절은 이 진입 추천가 기준으로 계산되므로 기준이 항상 일치)
+ENTRY_GAP_MAX_PCT=5.0
