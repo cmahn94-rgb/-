@@ -156,34 +156,40 @@ def grade_pending_signals(가격조회함수) -> dict:
         if df is None or len(df) == 0:
             continue
 
-        # 발생일 이후 구간의 고가/저가로 판정 (v5.20: 날짜 인덱스 직접 비교로 정밀화)
+        # ── 발생일 이후 구간을 '날짜순으로 순회'하며 판정 (v5.26) ──────
+        # [기존 치명 결함] 보유기간 전체의 최고/최저 하나만 비교했다.
+        #   → 30일 중 장중 한 번이라도 -5%를 스치면 무조건 '패'.
+        #   → 한국장에서 30일 내 장중 -5% 터치는 거의 필연 → 승률 0% 발생.
+        #   → 실제로는 그 뒤 반등해 수익 중인 종목도 전부 패로 기록됐다.
+        # [수정] 하루씩 순서대로 보면서 '먼저 도달한 쪽'으로 결정한다.
+        #   손절은 종가 기준(장중 스침으로 던지지 않는 실제 운용 방식),
+        #   목표는 장중 고가 기준(지정가 매도는 장중 체결되므로).
         try:
             close = df["Close"].squeeze()
             high  = df["High"].squeeze() if "High" in df.columns else close
             low   = df["Low"].squeeze()  if "Low"  in df.columns else close
             현재 = float(close.iloc[-1])
 
-            # 인덱스가 날짜형이면 발생일 이후만 정확히 필터링
             발생일_naive = 발생일.replace(tzinfo=None)
-            mask = None
             try:
                 idx = close.index
-                if hasattr(idx, "tz") and idx.tz is not None:
-                    idx_cmp = idx.tz_localize(None)
-                else:
-                    idx_cmp = idx
+                idx_cmp = idx.tz_localize(None) if getattr(idx, "tz", None) is not None else idx
                 mask = idx_cmp > 발생일_naive
             except Exception:
                 mask = None
 
             if mask is not None and hasattr(mask, "sum") and mask.sum() > 0:
-                이후_고 = float(high[mask].max())
-                이후_저 = float(low[mask].min())
+                seg_close = close[mask]
+                seg_high  = high[mask]
+                seg_low   = low[mask]
             else:
-                # 폴백: 경과일 기반 tail 근사
                 n = max(1, 경과일)
-                이후_고 = float(high.tail(n).max())
-                이후_저 = float(low.tail(n).min())
+                seg_close = close.tail(n)
+                seg_high  = high.tail(n)
+                seg_low   = low.tail(n)
+            if len(seg_close) == 0:
+                continue
+            이후_저 = float(seg_low.min())     # 체결 판정용(지정가 도달 여부)
         except Exception:
             continue
 
@@ -204,18 +210,36 @@ def grade_pending_signals(가격조회함수) -> dict:
                 sig["채점일"] = 오늘_dt.strftime("%Y-%m-%d")
                 sig["결과"]   = "미체결"
                 sig["수익률"] = 0.0
+                sig["채점버전"] = GRADING_VERSION
                 통계["미체결"] = 통계.get("미체결", 0) + 1
             continue   # 아직 기간 남았으면 다음 실행에서 재확인
 
         결과 = None
-        # 목표 도달 (고가가 목표 이상)
-        if 목표 > 0 and 이후_고 >= 목표:
-            결과 = "승"; 수익률 = (목표 / 진입 - 1) * 100
-        # 손절 도달 (저가가 손절 이하)
-        elif 손절 > 0 and 이후_저 <= 손절:
-            결과 = "패"; 수익률 = (손절 / 진입 - 1) * 100
-        # 보유상한 초과 → 현재가로 중립 청산
-        elif 상한도달:
+        수익률 = 0.0
+        # 체결된 날부터 순회 시작 (지정가 도달 이전 구간은 보유 전이므로 제외)
+        보유중 = False
+        for i in range(len(seg_close)):
+            일_저 = float(seg_low.iloc[i])
+            일_고 = float(seg_high.iloc[i])
+            일_종 = float(seg_close.iloc[i])
+            if not 보유중:
+                if 일_저 <= 진입:      # 이 날 지정가 체결
+                    보유중 = True
+                else:
+                    continue
+            # 목표: 장중 고가 도달 시 체결 (지정가 매도)
+            if 목표 > 0 and 일_고 >= 목표:
+                결과 = "승"; 수익률 = (목표 / 진입 - 1) * 100
+                break
+            # 손절: 종가가 손절선 아래일 때만 (장중 스침으론 청산하지 않음)
+            if 손절 > 0 and 일_종 <= 손절:
+                결과 = "패"; 수익률 = (일_종 / 진입 - 1) * 100
+                break
+
+        # 목표·손절 모두 미도달 → 보유상한 초과 시에만 현재가로 청산 판정
+        if 결과 is None:
+            if not 상한도달:
+                continue          # 아직 보유 기간 남음 → 다음 실행에서 재확인
             수익률 = (현재 / 진입 - 1) * 100
             결과 = "승" if 수익률 > 0 else ("패" if 수익률 < 0 else "중립")
             결과 = "중립" if abs(수익률) < 0.5 else 결과
@@ -225,6 +249,7 @@ def grade_pending_signals(가격조회함수) -> dict:
             sig["채점일"] = 오늘_dt.strftime("%Y-%m-%d")
             sig["결과"]   = 결과
             sig["수익률"] = round(수익률, 2)
+            sig["채점버전"] = GRADING_VERSION   # 채점 기준 추적용
             통계["채점"] += 1
             통계[결과] = 통계.get(결과, 0) + 1
             # 실시간 알림용: 방금 채점된 신호 상세 (v5.20)
@@ -363,6 +388,15 @@ def record_and_grade(신호_종목_요약: list, 모멘텀_결과_맵: dict,
     } for t, r in (모멘텀_결과_맵 or {}).items() if r and r.get("충족")]
     record_signals(모멘텀_기록, "모멘텀")
 
+    # 구버전 채점 기록 아카이브 (최초 1회만 실제 이관 발생)
+    try:
+        _m = migrate_legacy_log()
+        if _m["이관"]:
+            print(f"  🗄️ 구버전 채점 기록 {_m['이관']}건을 아카이브로 분리 "
+                  f"(signal_log_legacy.json) — 측정 오류 데이터라 통계 제외")
+    except Exception:
+        pass
+
     # 이전 신호 채점 (캐시된 가격 재사용)
     return grade_pending_signals(가격조회함수)
 
@@ -385,3 +419,61 @@ def format_grading_alerts(채점통계: dict) -> str:
         판정 = {"승": "목표 도달", "패": "손절", "중립": "청산"}.get(a["결과"], a["결과"])
         줄.append(f"  {아이콘} {전략아이콘} {a['name']}: {판정} ({a['수익률']:+.1f}%)")
     return "\n".join(줄) + "\n"
+
+
+# 채점 로직 버전 — 이 값이 바뀌면 이전 기록은 다른 기준으로 채점된 것이다
+GRADING_VERSION = "v5.26"
+
+
+def migrate_legacy_log() -> dict:
+    """
+    구버전 채점 로직으로 기록된 신호를 아카이브하고 통계에서 분리한다.
+
+    [중학생 설명]
+    v5.25까지의 채점기는 '보유기간 중 장중 최저가가 손절선을 스치면 무조건 패'로
+    판정했다. 한국장에서 30일 내 장중 -5% 터치는 거의 필연이라, 나중에 반등해
+    수익 중인 종목까지 전부 패로 기록됐다(실제로 0승 39패가 나왔다).
+    이 기록들은 전략 성능이 아니라 측정 오류이므로, 승률 통계에 섞이면 안 된다.
+    → 지우지 않고 signal_log_legacy.json으로 옮겨 보존하되, 통계에서는 제외한다.
+
+    반환: {"이관": N, "유지": N}
+    """
+    data = _load_log()
+    신호들 = data.get("signals", [])
+    if not 신호들:
+        return {"이관": 0, "유지": 0}
+
+    legacy, keep = [], []
+    for s in 신호들:
+        # 채점 버전이 없는(=구버전에서 채점된) 완료 건만 이관.
+        # 아직 '보유중'인 건은 새 로직으로 채점되므로 그대로 둔다.
+        if s.get("상태") in ("채점완료", "미체결") and not s.get("채점버전"):
+            legacy.append(s)
+        else:
+            keep.append(s)
+
+    if not legacy:
+        return {"이관": 0, "유지": len(keep)}
+
+    # 아카이브 저장 (덮어쓰지 않고 누적)
+    import os as _os
+    legacy_path = _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)), "signal_log_legacy.json")
+    try:
+        with open(legacy_path, "r", encoding="utf-8") as f:
+            prev = json.load(f)
+        기존 = prev.get("signals", [])
+    except Exception:
+        기존 = []
+    try:
+        with open(legacy_path, "w", encoding="utf-8") as f:
+            json.dump({"note": "v5.25 이전 채점 로직(장중 저가 기준)으로 기록된 신호. "
+                               "측정 오류가 있어 통계에서 제외함.",
+                       "signals": 기존 + legacy},
+                      f, ensure_ascii=False, indent=2)
+    except Exception:
+        return {"이관": 0, "유지": len(신호들)}
+
+    data["signals"] = keep
+    _save_log(data)
+    return {"이관": len(legacy), "유지": len(keep)}

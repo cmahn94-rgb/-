@@ -454,3 +454,107 @@ class TestUnfilledGrading:
         finally:
             if os.path.exists(pt._log_path()):
                 os.remove(pt._log_path())
+
+
+# ═══════════════════════════════════════════════════════════
+# 11. 채점기 정확성 (v5.26 — 승률 0% 사태 재발 방지)
+# ═══════════════════════════════════════════════════════════
+class TestGradingAccuracy:
+    """장중 저가가 손절선을 스쳤다는 이유만으로 '패' 처리하면
+    한국장에서 승률이 구조적으로 0%가 된다 (실제 0승 39패 발생).
+    손절은 종가 기준, 목표는 장중 고가 기준, 판정은 '먼저 온 쪽'."""
+
+    def _grade(self, 종가들, 저가배수=0.995, 경과=35,
+               진입=100, 목표=112, 손절=95, 상한=30):
+        import os, pandas as pd
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        import performance_tracker as pt
+        KST = ZoneInfo("Asia/Seoul")
+        pt._LOG_FILENAME = "test_grading_acc.json"
+        if os.path.exists(pt._log_path()):
+            os.remove(pt._log_path())
+        try:
+            발생 = (datetime.now(KST) - timedelta(days=경과)).strftime("%Y-%m-%d")
+            pt._save_log({"signals": [{
+                "id": "x", "날짜": 발생, "ticker": "T.KS", "name": "t",
+                "market": "KR", "전략": "안정", "진입가": 진입, "목표가": 목표,
+                "손절가": 손절, "보유상한일": 상한, "상태": "보유중",
+                "채점일": None, "결과": None, "수익률": None}]})
+
+            def mp(t, period="3mo"):
+                d = pd.date_range(datetime.now() - timedelta(days=len(종가들)),
+                                  periods=len(종가들), tz=KST)
+                c = pd.Series(종가들, index=d)
+                return pd.DataFrame({"Close": c, "High": c * 1.005,
+                                     "Low": c * 저가배수}, index=d)
+
+            pt.grade_pending_signals(mp)
+            return pt._load_log()["signals"][0]
+        finally:
+            if os.path.exists(pt._log_path()):
+                os.remove(pt._log_path())
+
+    def test_intraday_dip_not_counted_as_loss(self):
+        """장중 -6% 스침 + 종가는 손절선 위 + 이후 회복 → 패가 아니어야 한다."""
+        s = self._grade([100, 98, 96, 97, 100, 104, 107, 109, 110, 110] + [110] * 15,
+                        저가배수=0.94)
+        assert s["결과"] == "승"
+
+    def test_real_decline_is_loss(self):
+        """종가가 손절선 아래로 내려가면 정상적으로 패."""
+        s = self._grade([100, 97, 94, 92, 90, 89, 88, 88, 88, 88] + [88] * 15)
+        assert s["결과"] == "패"
+
+    def test_target_hit_is_win(self):
+        s = self._grade([100, 98, 101, 105, 109, 113, 115, 115, 115, 115] + [115] * 15,
+                        경과=25)
+        assert s["결과"] == "승"
+
+    def test_pending_not_graded_early(self):
+        """보유 기간이 남았고 목표·손절 미도달이면 성급히 채점하지 않는다."""
+        s = self._grade([100, 99, 101, 102, 103] + [103] * 10, 경과=5)
+        assert s["상태"] == "보유중"
+
+    def test_grading_version_tagged(self):
+        s = self._grade([100, 98, 101, 105, 109, 113, 115] + [115] * 15, 경과=25)
+        assert s.get("채점버전")
+
+
+class TestLegacyMigration:
+    """구버전 채점 기록은 통계에서 분리하되 보존해야 한다 (v5.26)."""
+
+    def test_migration_separates_and_preserves(self):
+        import os, json
+        import performance_tracker as pt
+        pt._LOG_FILENAME = "test_migration.json"
+        legacy_p = os.path.join(
+            os.path.dirname(os.path.abspath(pt.__file__)), "signal_log_legacy.json")
+        for p in (pt._log_path(), legacy_p):
+            if os.path.exists(p):
+                os.remove(p)
+        try:
+            sigs = [{"id": f"a{i}", "날짜": "2026-07-01", "ticker": f"T{i}.KS",
+                     "name": "t", "market": "KR", "전략": "안정", "진입가": 100,
+                     "목표가": 112, "손절가": 95, "보유상한일": 30,
+                     "상태": "채점완료", "채점일": "2026-08-01",
+                     "결과": "패", "수익률": -5.0} for i in range(5)]
+            sigs.append({"id": "h", "날짜": "2026-08-02", "ticker": "H.KS",
+                         "name": "h", "market": "KR", "전략": "안정", "진입가": 100,
+                         "목표가": 112, "손절가": 95, "보유상한일": 30,
+                         "상태": "보유중", "채점일": None,
+                         "결과": None, "수익률": None})
+            pt._save_log({"signals": sigs})
+
+            r = pt.migrate_legacy_log()
+            assert r["이관"] == 5 and r["유지"] == 1
+            # 통계에서 제외됐는지
+            summary = pt.get_performance_summary()
+            assert summary["전체_채점"] == 0 and summary["보유중"] == 1
+            # 아카이브에 보존됐는지
+            arch = json.load(open(legacy_p, encoding="utf-8"))
+            assert len(arch["signals"]) == 5
+        finally:
+            for p in (pt._log_path(), legacy_p):
+                if os.path.exists(p):
+                    os.remove(p)
